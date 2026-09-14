@@ -271,6 +271,16 @@ func TestCoversAll(t *testing.T) {
 	}
 }
 
+func TestMergeRanges_MaxIntDoesNotOverflow(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	ranges := []redis_cluster.SlotsRange{
+		{First: maxInt, Last: maxInt},
+		{First: maxInt, Last: maxInt},
+	}
+
+	assert.Equal(t, []redis_cluster.SlotsRange{{First: maxInt, Last: maxInt}}, mergeRanges(ranges))
+}
+
 func TestDecisionTable(t *testing.T) {
 	shards := func(states ...ShardState) []ShardAssessment {
 		out := make([]ShardAssessment, len(states))
