@@ -1,0 +1,72 @@
+nameOverride: ""
+fullnameOverride: ""
+
+namespace:
+  create: false
+
+operator:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/datadog/redis-cluster-kubernetes-operator
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    create: true
+    name: ""
+  redisAuth:
+    # The Secret must already exist in the release namespace. Credential
+    # values are read inside the toolbox and are never passed in exec argv.
+    secretName: ""
+    usernameKey: username
+    passwordKey: password
+  leaderElection:
+    enabled: false
+  metrics:
+    enabled: true
+    port: 8080
+    service:
+      enabled: true
+      annotations: {}
+  probes:
+    enabled: true
+    port: 8081
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 6
+  terminationGracePeriodSeconds: 10
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  podAnnotations: {}
+  podLabels: {}
+
+toolbox:
+  image:
+    repository: redis
+    tag: "8.6.0"
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    create: true
+    name: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  podAnnotations: {}
+  podLabels: {}
+
+# Redis client port used by the toolbox. The cluster bus port is port + 10000.
+port: 6379
+
+backup:
+  # Backups are disabled per RedisCluster. Set a bucket only when a workload
+  # explicitly enables backups and supplies its backend sidecar.
+  bucketName: ""

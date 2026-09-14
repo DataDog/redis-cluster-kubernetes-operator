@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "nameOverride": { "$ref": "#/definitions/dnsLabelOrEmpty" },
+    "fullnameOverride": { "$ref": "#/definitions/dnsLabelOrEmpty" },
+    "namespace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create"],
+      "properties": { "create": { "type": "boolean" } }
+    },
+    "operator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replicaCount", "image", "serviceAccount", "redisAuth", "leaderElection", "metrics", "probes", "terminationGracePeriodSeconds", "resources", "podAnnotations", "podLabels"],
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "image": { "$ref": "#/definitions/image" },
+        "serviceAccount": { "$ref": "#/definitions/serviceAccount" },
+        "redisAuth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secretName", "usernameKey", "passwordKey"],
+          "properties": {
+            "secretName": { "$ref": "#/definitions/dnsSubdomainOrEmpty" },
+            "usernameKey": { "$ref": "#/definitions/secretKey" },
+            "passwordKey": { "$ref": "#/definitions/secretKey" }
+          }
+        },
+        "leaderElection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": { "enabled": { "type": "boolean" } }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "port", "service"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 1024, "maximum": 65535 },
+            "service": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "annotations"],
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "annotations": { "$ref": "#/definitions/stringMap" }
+              }
+            }
+          }
+        },
+        "probes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "port", "initialDelaySeconds", "periodSeconds", "timeoutSeconds", "failureThreshold"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 1024, "maximum": 65535 },
+            "initialDelaySeconds": { "type": "integer", "minimum": 0, "maximum": 300 },
+            "periodSeconds": { "type": "integer", "minimum": 1, "maximum": 300 },
+            "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 60 },
+            "failureThreshold": { "type": "integer", "minimum": 1, "maximum": 30 }
+          }
+        },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0, "maximum": 300 },
+        "resources": { "$ref": "#/definitions/resources" },
+        "podAnnotations": { "$ref": "#/definitions/stringMap" },
+        "podLabels": { "$ref": "#/definitions/operatorPodLabels" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "serviceAccount": { "properties": { "create": { "const": false } } } } },
+          "then": { "properties": { "serviceAccount": { "properties": { "name": { "$ref": "#/definitions/dnsLabel" } } } } }
+        },
+        {
+          "if": { "properties": { "replicaCount": { "minimum": 2 } } },
+          "then": { "properties": { "leaderElection": { "properties": { "enabled": { "const": true } } } } }
+        }
+      ]
+    },
+    "toolbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "serviceAccount", "resources", "podAnnotations", "podLabels"],
+      "properties": {
+        "image": { "$ref": "#/definitions/image" },
+        "serviceAccount": { "$ref": "#/definitions/serviceAccount" },
+        "resources": { "$ref": "#/definitions/resources" },
+        "podAnnotations": { "$ref": "#/definitions/stringMap" },
+        "podLabels": { "$ref": "#/definitions/toolboxPodLabels" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "serviceAccount": { "properties": { "create": { "const": false } } } } },
+          "then": { "properties": { "serviceAccount": { "properties": { "name": { "$ref": "#/definitions/dnsLabel" } } } } }
+        }
+      ]
+    },
+    "port": { "type": "integer", "minimum": 1, "maximum": 55535 },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bucketName"],
+      "properties": {
+        "bucketName": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^(?:|[A-Za-z0-9][A-Za-z0-9._-]{1,254})$"
+        }
+      }
+    }
+  },
+  "required": ["namespace", "operator", "toolbox", "port", "backup"],
+  "definitions": {
+    "dnsLabel": { "type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$" },
+    "dnsLabelOrEmpty": { "type": "string", "maxLength": 63, "pattern": "^(?:|[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)$" },
+    "dnsSubdomainOrEmpty": { "type": "string", "maxLength": 253, "pattern": "^(?:|[a-z0-9](?:[-.a-z0-9]*[a-z0-9])?)$" },
+    "secretKey": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9._-]+$" },
+    "stringMap": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 1024 } },
+    "operatorPodLabels": {
+      "allOf": [
+        { "$ref": "#/definitions/stringMap" },
+        { "propertyNames": { "not": { "enum": ["app.kubernetes.io/name", "app.kubernetes.io/instance", "app.kubernetes.io/component"] } } }
+      ]
+    },
+    "toolboxPodLabels": {
+      "allOf": [
+        { "$ref": "#/definitions/stringMap" },
+        { "propertyNames": { "not": { "enum": ["app.kubernetes.io/name", "app.kubernetes.io/instance", "app.kubernetes.io/component", "app", "service"] } } }
+      ]
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "name"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "$ref": "#/definitions/dnsLabelOrEmpty" }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[a-z0-9]+(?:[._/-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$" },
+        "tag": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": { "$ref": "#/definitions/resourceList" },
+        "limits": { "$ref": "#/definitions/resourceList" }
+      }
+    },
+    "resourceList": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": { "type": "string", "pattern": "^[0-9]+(?:m|\\.[0-9]+)?$" },
+        "memory": { "type": "string", "pattern": "^[0-9]+(?:Ki|Mi|Gi|Ti|K|M|G|T)?$" }
+      }
+    }
+  }
+}

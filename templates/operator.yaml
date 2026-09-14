@@ -1,0 +1,95 @@
+{{- if and (gt (int .Values.operator.replicaCount) 1) (not .Values.operator.leaderElection.enabled) }}
+{{- fail "operator.leaderElection.enabled must be true when operator.replicaCount is greater than one" }}
+{{- end }}
+{{- if and .Values.operator.metrics.enabled .Values.operator.probes.enabled (eq (int .Values.operator.metrics.port) (int .Values.operator.probes.port)) }}
+{{- fail "operator.metrics.port and operator.probes.port must be different when both listeners are enabled" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "redis-cluster-kubernetes-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redis-cluster-kubernetes-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  replicas: {{ .Values.operator.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "redis-cluster-kubernetes-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "redis-cluster-kubernetes-operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.operator.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.operator.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "redis-cluster-kubernetes-operator.operatorServiceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: {{ printf "%s:%s" .Values.operator.image.repository .Values.operator.image.tag | quote }}
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          args:
+            - manage
+            - {{ printf "--metrics-addr=%s" (ternary (printf ":%v" .Values.operator.metrics.port) "0" .Values.operator.metrics.enabled) | quote }}
+            - {{ printf "--health-probe-bind-address=%s" (ternary (printf ":%v" .Values.operator.probes.port) "0" .Values.operator.probes.enabled) | quote }}
+            - {{ printf "--enable-leader-election=%t" .Values.operator.leaderElection.enabled | quote }}
+          env:
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: REDIS_AUTH_MODE
+              value: {{ ternary "secret" "none" (ne .Values.operator.redisAuth.secretName "") | quote }}
+            - name: BACKUP_BUCKET
+              value: {{ .Values.backup.bucketName | quote }}
+          {{- if or .Values.operator.metrics.enabled .Values.operator.probes.enabled }}
+          ports:
+            {{- if .Values.operator.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.operator.metrics.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.operator.probes.enabled }}
+            - name: health
+              containerPort: {{ .Values.operator.probes.port }}
+              protocol: TCP
+            {{- end }}
+          {{- end }}
+          {{- if .Values.operator.probes.enabled }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: {{ .Values.operator.probes.initialDelaySeconds }}
+            periodSeconds: {{ .Values.operator.probes.periodSeconds }}
+            timeoutSeconds: {{ .Values.operator.probes.timeoutSeconds }}
+            failureThreshold: {{ .Values.operator.probes.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: {{ .Values.operator.probes.initialDelaySeconds }}
+            periodSeconds: {{ .Values.operator.probes.periodSeconds }}
+            timeoutSeconds: {{ .Values.operator.probes.timeoutSeconds }}
+            failureThreshold: {{ .Values.operator.probes.failureThreshold }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+      terminationGracePeriodSeconds: {{ .Values.operator.terminationGracePeriodSeconds }}

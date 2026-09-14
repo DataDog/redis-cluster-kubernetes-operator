@@ -1,0 +1,131 @@
+name: Test
+
+on:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install Kubernetes 1.33 envtest binaries
+        run: |
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20250626154428-7fd020cb5fc3 use 1.33.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
+      - run: go test ./...
+
+  chart:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - name: Lint and validate chart values
+        run: |
+          helm lint . --strict --kube-version 1.33.0
+          helm lint . --strict --kube-version 1.33.0 \
+            --set operator.redisAuth.secretName=redis-auth \
+            --set operator.replicaCount=2 \
+            --set operator.leaderElection.enabled=true
+          helm lint . --strict --kube-version 1.33.0 \
+            --set operator.metrics.enabled=false \
+            --set operator.metrics.service.enabled=false \
+            --set operator.probes.enabled=false
+          if helm template invalid-image . --kube-version 1.33.0 \
+            --set operator.image.repository=https://invalid.example/operator; then
+            echo "invalid image repository passed schema validation" >&2
+            exit 1
+          fi
+          if helm template invalid-label . --kube-version 1.33.0 \
+            --set-string 'toolbox.podLabels.app=invalid'; then
+            echo "reserved toolbox label passed schema validation" >&2
+            exit 1
+          fi
+      - name: Install standard KIND
+        run: go install sigs.k8s.io/kind@v0.30.0
+      - name: Build and load operator image
+        run: |
+          kind create cluster --name chart --image kindest/node:v1.33.1 --wait 120s
+          docker build --tag redis-cluster-kubernetes-operator:ci .
+          kind load docker-image redis-cluster-kubernetes-operator:ci --name chart
+      - name: Install two namespace-scoped releases
+        run: |
+          kubectl create namespace alpha
+          kubectl create namespace beta
+          kubectl create secret generic redis-auth -n beta \
+            --from-literal=username=operator \
+            --from-literal=password=test-password
+          helm install alpha . --namespace alpha \
+            --set operator.image.repository=redis-cluster-kubernetes-operator \
+            --set operator.image.tag=ci \
+            --set operator.image.pullPolicy=Never
+          helm install beta . --namespace beta \
+            --set operator.image.repository=redis-cluster-kubernetes-operator \
+            --set operator.image.tag=ci \
+            --set operator.image.pullPolicy=Never \
+            --set operator.redisAuth.secretName=redis-auth
+          kubectl wait --for=condition=Available deployment --all -n alpha --timeout=180s
+          kubectl wait --for=condition=Available deployment --all -n beta --timeout=180s
+          test "$(kubectl get pod -n alpha -l app.kubernetes.io/component=toolbox \
+            -o jsonpath='{.items[0].spec.automountServiceAccountToken}')" = "false"
+          test "$(kubectl get pod -n beta -l app.kubernetes.io/component=toolbox \
+            -o jsonpath='{.items[0].spec.automountServiceAccountToken}')" = "false"
+          kubectl create namespace redis-cluster-example
+          kubectl apply --server-side --dry-run=server -f examples/redis-cluster.yaml
+          test -z "$(kubectl get clusterroles,clusterrolebindings \
+            -l app.kubernetes.io/instance=alpha -o name)"
+          test -z "$(kubectl get clusterroles,clusterrolebindings \
+            -l app.kubernetes.io/instance=beta -o name)"
+      - name: Delete KIND cluster
+        if: always()
+        run: kind delete cluster --name chart
+
+  pull-request-smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install standard KIND
+        run: go install sigs.k8s.io/kind@v0.30.0
+      - name: Run public smoke lane
+        run: ci/run-e2e-lane.sh smoke
+
+  scheduled-full:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [default, slow, bg-stuck, loadgen]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install standard KIND
+        run: go install sigs.k8s.io/kind@v0.30.0
+      - name: Run full lane
+        run: ci/run-e2e-lane.sh "${{ matrix.lane }}"
