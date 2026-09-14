@@ -213,7 +213,7 @@ func mergeRanges(ranges []redis_cluster.SlotsRange) []redis_cluster.SlotsRange {
 	merged := []redis_cluster.SlotsRange{sorted[0]}
 	for _, r := range sorted[1:] {
 		last := &merged[len(merged)-1]
-		if r.First <= last.Last+1 {
+		if r.First <= last.Last || (last.Last < r.First && last.Last == r.First-1) {
 			if r.Last > last.Last {
 				last.Last = r.Last
 			}
