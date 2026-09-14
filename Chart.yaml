@@ -1,0 +1,12 @@
+apiVersion: v2
+name: redis-cluster-kubernetes-operator
+description: A Kubernetes operator for Redis Cluster lifecycle, topology, and failure recovery
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.33.0-0 <1.34.0-0"
+home: https://github.com/DataDog/redis-cluster-kubernetes-operator
+sources:
+  - https://github.com/DataDog/redis-cluster-kubernetes-operator
+maintainers:
+  - name: Datadog

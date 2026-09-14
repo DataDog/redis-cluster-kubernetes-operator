@@ -1,0 +1,13 @@
+{{- if .Values.operator.redisAuth.secretName }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "redis-cluster-kubernetes-operator.redisAuthHelperName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redis-cluster-kubernetes-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: toolbox
+immutable: true
+binaryData:
+  redis-operator-redis-cli: {{ .Files.Get "files/redis-operator-redis-cli" | b64enc | quote }}
+{{- end }}
