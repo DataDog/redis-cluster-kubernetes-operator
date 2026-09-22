@@ -7,6 +7,7 @@ Makefile
 go.mod
 go.sum
 OPEN_SOURCE_REMOVAL_INVENTORY.md
+cleanroom-artifacts/
 
 apiv1/
 bluegreen/

@@ -337,6 +337,10 @@ func (h *Handler) Start(ctx context.Context, cluster *redis_cluster.Cluster) (ct
 
 	h.log.Info("Blue/green names resolved", "blue", blueName, "green", greenName)
 
+	if err := h.prepareBlueServiceRouting(ctx, cluster); err != nil {
+		return ctrl.Result{}, health.Error, utils.WrapErr(err, "failed to isolate serving blue pods before rollout")
+	}
+
 	// Disable replica migration for the BG duration — prevents gossip races from
 	// moving replicas to wrong primaries during promotion.
 	allIPs := make([]string, 0, len(cluster.AllNodes))
@@ -359,6 +363,50 @@ func (h *Handler) Start(ctx context.Context, cluster *redis_cluster.Cluster) (ct
 
 	_ = h.metrics.Count(counters.BlueGreenStarted)
 	return ctrl.Result{RequeueAfter: time.Second}, health.Warn, nil
+}
+
+func (h *Handler) prepareBlueServiceRouting(ctx context.Context, cluster *redis_cluster.Cluster) error {
+	bluePods, err := h.getBluePods(ctx, cluster.RedisCluster)
+	if err != nil {
+		return utils.WrapErr(err, "failed to list serving blue pods")
+	}
+	if len(bluePods.Items) == 0 {
+		return fmt.Errorf("no serving blue pods found")
+	}
+	for i := range bluePods.Items {
+		pod := &bluePods.Items[i]
+		if constants.IsRoleActive(pod.Labels) {
+			continue
+		}
+		markPodServable(pod)
+		if err := h.deps.Update(ctx, pod); err != nil {
+			return utils.WrapErr(err, "failed to mark blue pod active: "+pod.Name)
+		}
+	}
+
+	serviceName := cluster.RedisCluster.Spec.StatefulsetTemplate.Spec.ServiceName
+	if serviceName == "" {
+		return fmt.Errorf("statefulsetTemplate.spec.serviceName is empty")
+	}
+	service := &corev1.Service{}
+	if err := h.deps.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: cluster.RedisCluster.Namespace}, service); err != nil {
+		return utils.WrapErr(err, "failed to get serving headless service")
+	}
+	if len(service.Spec.Selector) == 0 {
+		return fmt.Errorf("serving headless service %s/%s has no selector", service.Namespace, service.Name)
+	}
+	if service.Spec.Selector[constants.BlueGreenRoleLabel] == constants.BlueGreenRoleActive {
+		return nil
+	}
+	selector := make(map[string]string, len(service.Spec.Selector)+1)
+	for key, value := range service.Spec.Selector {
+		selector[key] = value
+	}
+	selector[constants.BlueGreenRoleLabel] = constants.BlueGreenRoleActive
+	if err := h.deps.UpdateServiceSelector(ctx, service.Namespace, service.Name, selector); err != nil {
+		return utils.WrapErr(err, "failed to restrict serving headless service to active pods")
+	}
+	return nil
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -504,7 +552,7 @@ func (h *Handler) bgSetupReplication(ctx context.Context, cluster *redis_cluster
 		}
 	}
 
-	h.labelGreenPodsForDNS(ctx, greenPods)
+	h.labelGreenPodsForPeerDiscovery(ctx, greenPods)
 
 	for i, bluePrimary := range bluePrimaries {
 		greenPod := greenPods[i]
@@ -856,7 +904,10 @@ func (h *Handler) bgPromote(ctx context.Context, cluster *redis_cluster.Cluster)
 			h.log.Error(err, "Failed to get green pod for labeling", "pod", m.GreenPodName)
 			continue
 		}
-		markPodServable(pod)
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		constants.ActivateRedisCluster(pod.Labels)
 		if err := h.deps.Update(ctx, pod); err != nil {
 			h.log.Error(err, "Failed to label green pod before failover", "pod", m.GreenPodName)
 		}
@@ -1870,13 +1921,16 @@ func markPodServable(pod *corev1.Pod) {
 	constants.ActivateRedisCluster(pod.Labels)
 }
 
-func (h *Handler) labelGreenPodsForDNS(ctx context.Context, greenPods []corev1.Pod) {
+func (h *Handler) labelGreenPodsForPeerDiscovery(ctx context.Context, greenPods []corev1.Pod) {
 	for i := range greenPods {
-		markPodServable(&greenPods[i])
+		if greenPods[i].Labels == nil {
+			greenPods[i].Labels = make(map[string]string)
+		}
+		constants.ActivateRedisCluster(greenPods[i].Labels)
 		if err := h.deps.Update(ctx, &greenPods[i]); err != nil {
-			h.log.Error(err, "Failed to label green pod for DNS", "pod", greenPods[i].Name)
+			h.log.Error(err, "Failed to label green pod for peer discovery", "pod", greenPods[i].Name)
 		} else {
-			h.log.Info("Labeled green pod for DNS before CLUSTER MEET", "pod", greenPods[i].Name)
+			h.log.Info("Labeled green pod for peer discovery before CLUSTER MEET", "pod", greenPods[i].Name)
 		}
 	}
 }

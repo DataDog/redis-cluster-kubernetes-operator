@@ -17,6 +17,9 @@ const (
 	// Service selector label — pods with role=active are included in service endpoints.
 	BlueGreenRoleLabel  = "redis-cluster-role"
 	BlueGreenRoleActive = "active"
+	// BlueGreenStatefulSetLabel gives peer-discovery Services a stable,
+	// rollout-specific selector without exposing non-serving pods to clients.
+	BlueGreenStatefulSetLabel = "redis-cluster-statefulset"
 
 	// STS suffix for the alternate StatefulSet used during blue/green deployments.
 	// Names toggle between "base" and "base-alt" across BG cycles.
