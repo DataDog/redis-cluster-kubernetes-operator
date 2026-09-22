@@ -1,5 +1,6 @@
 .git
 .github
+/cleanroom-artifacts
 *.md
 ci
 e2e

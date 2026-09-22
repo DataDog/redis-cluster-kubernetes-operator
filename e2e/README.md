@@ -5,6 +5,12 @@ pods in a KIND cluster. Its 23 scenarios cover lifecycle, maintenance, scaling,
 backup/restore, Kubernetes termination safety, blue-green rollout, data
 integrity, and availability during faults.
 
+This is regression and diagnostic coverage for reconciliation behavior. It does
+not install the public Helm chart or run the packaged operator Deployment, so it
+does not qualify the public installation. The independent deployed-operator
+suite is documented in `test/blackbox/README.md` and runs through
+`ci/run-cleanroom.sh`.
+
 ## Mental model
 
 ```text
@@ -94,8 +100,10 @@ go test ./e2e
 ```
 
 Local and CI execution use ordinary `go test` commands. Pull requests run the
-small `smoke` lane. The daily schedule and manual workflow run the four complete
-lanes independently against Kubernetes 1.33 and Redis 8.6.
+small in-process `smoke` lane as a diagnostic alongside the required packaged
+operator clean-room smoke. The daily schedule and manual workflow run the four
+complete in-process lanes independently against Kubernetes 1.33 and Redis 8.6;
+separate jobs run every deployed-operator clean-room lane in fresh clusters.
 
 ## Add a test
 

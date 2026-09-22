@@ -50,12 +50,24 @@ See `examples/README.md` for its PVC-backed `nodes.conf` layout. Backups are dis
 
 ## Redis authentication
 
-The public startup supports either no authentication (the default) or a same-namespace Secret. Configure Redis itself with the same ACL user, then create the Secret and reference its keys:
+The public startup supports either no authentication (the default) or a
+same-namespace Secret. Configure Redis itself with the same ACL user, then
+create the Secret and reference its keys. The following example reads the
+values without putting either credential in a process argument or a committed
+file; `jq` passes the generated manifest to `kubectl` over standard input:
 
 ```sh
-kubectl -n redis-operator create secret generic redis-auth \
-  --from-literal=username=operator \
-  --from-literal=password='replace-me'
+read -r -p 'Redis ACL username: ' REDIS_USERNAME
+read -r -s -p 'Redis ACL password: ' REDIS_PASSWORD
+printf '\n'
+REDIS_USERNAME="$REDIS_USERNAME" REDIS_PASSWORD="$REDIS_PASSWORD" jq -n '{
+  apiVersion: "v1",
+  kind: "Secret",
+  metadata: {name: "redis-auth", namespace: "redis-operator"},
+  type: "Opaque",
+  stringData: {username: env.REDIS_USERNAME, password: env.REDIS_PASSWORD}
+}' | kubectl apply -f -
+unset REDIS_USERNAME REDIS_PASSWORD
 
 helm upgrade --install redis-cluster-kubernetes-operator . \
   --namespace redis-operator \
@@ -98,11 +110,18 @@ Successful backups rotate exactly two generations: the new complete backup is pr
 
 Backup manifests are versioned and artifacts carry size and SHA-256 metadata; malformed or mismatched data fails closed. The manifest authentication decision (signature or MAC) is not frozen and remains a security-review gate.
 
+Backup validation currently consists of unit and in-process integration
+coverage. Backups are not qualified through the deployed-operator clean-room
+or EKS suites in this cycle, so the project does not yet claim deployed backup
+portability.
+
 ## Beta limitations
 
 - Only Redis 8.6 and Kubernetes 1.33 are claimed as compatible.
 - The repository does not publish an image or chart during Phase 1.
 - No autoscaling recommendation provider or provider-specific lifecycle adapter is enabled by public startup.
+- Primary downscale is not supported in the initial public release. Lowering `spec.primaries` does not lower the retained effective target or remove Redis pods.
+- Blue-green rollout qualification covers image changes. Resource-only pod template changes are not currently included in the rollout hash.
 - Backup deployment is not provided by the reference workload and requires the prerequisites above.
 - The Phase 1 toolbox remains present. Its Redis operations are typed, but removal of the toolbox is future work.
 - The CRD is cluster-scoped while each controller watches one namespace. Coordinate CRD lifecycle when installing multiple releases.
@@ -115,5 +134,49 @@ go vet ./...
 helm lint . --strict --kube-version 1.33.0
 helm template redis-cluster-kubernetes-operator . --namespace redis-operator --kube-version 1.33.0
 ```
+
+## Clean-room qualification
+
+The public qualification path builds the operator from this repository,
+creates a fresh Kubernetes 1.33 cluster, installs only this repository's
+chart, and reconciles Redis 8.6 through the packaged operator Deployment. It
+does not use dd-source, an internal chart, a private registry, or a
+pre-existing operator installation.
+
+Local prerequisites are Docker, Go, KIND, `kubectl`, and Helm 3. From the repository root, the complete smoke path is one command:
+
+```sh
+ci/run-cleanroom.sh kind smoke
+```
+
+The runner creates a dedicated four-node KIND cluster, builds and loads the
+operator image, installs the chart and reference workload, verifies Redis
+topology and durable data, and deletes the cluster even when a check fails.
+Run all deployed-operator scenarios with `ci/run-cleanroom.sh kind full`, or
+select `packaging`, `lifecycle`, `topology`, or `security` in place of `full`.
+
+The tests under `e2e/` remain useful reconciler regression and diagnostic
+tests, but they run the manager inside the Go test process. They are not
+evidence that the packaged chart and operator Deployment work. See
+`test/blackbox/README.md` and `e2e/README.md` for the exact coverage and CI
+model.
+
+The EKS 1.33 portability gate is manual during Phase 1 because it creates
+chargeable resources. Kubernetes 1.33 is in EKS extended support and incurs
+extended-support charges; check the current lifecycle before running it:
+https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html
+
+The workflow creates a run-scoped EKS cluster, VPC, managed node group,
+EBS-backed storage, and private immutable ECR repository. Both the runner and
+an independent final job invoke ownership-checked cleanup. Configure the
+protected `cleanroom-eks` GitHub environment, repository variable
+`CLEANROOM_AWS_ACCOUNT_ID`, and repository OIDC role secret
+`CLEANROOM_AWS_ROLE_ARN`, then manually dispatch **EKS qualification**. The AWS
+configuration is repository-level so the unconditional cleanup job can
+authenticate without a second environment approval. The role needs the scoped
+EKS, CloudFormation, EC2/VPC, IAM pass-role and Pod Identity, ECR, EBS CSI,
+STS, and resource-tagging permissions used by the runner and cleanup audit.
+
+Qualification reports configured workload and operation totals only. It makes no achieved-QPS, latency, or maximum-outage claim.
 
 See `CONTRIBUTING.md` and `SECURITY.md` before proposing changes. The project is licensed under Apache-2.0; third-party production dependencies are listed in `LICENSE-3rdparty.csv`.

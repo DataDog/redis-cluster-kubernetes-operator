@@ -97,11 +97,15 @@ func newRedisCluster(name, namespace string, primaries, replicas int32) *cachev1
 					ServiceName: name,
 					Replicas:    ptr(primaries * (1 + replicas)),
 					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+							"app": "rco", "redis_cluster_name": name,
+						}},
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
 								{
 									Name:  "redis",
 									Image: "redis:7.2.0",
+									Env:   []corev1.EnvVar{{Name: "REDIS_SERVICE_NAME", Value: name}},
 								},
 							},
 						},
@@ -118,9 +122,27 @@ func newRedisCluster(name, namespace string, primaries, replicas int32) *cachev1
 func newTestDeps(t *testing.T, rc *cachev1.RedisCluster) *testDeps {
 	t.Helper()
 	scheme := newScheme(t)
+	objects := []runtime.Object{
+		rc,
+		&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: rc.Spec.StatefulsetTemplate.Spec.ServiceName, Namespace: rc.Namespace},
+			Spec:       corev1.ServiceSpec{Selector: map[string]string{"redis_cluster_name": rc.Name}},
+		},
+	}
+	for i := int32(0); i < *rc.Spec.StatefulsetTemplate.Spec.Replicas; i++ {
+		labels := make(map[string]string, len(rc.Spec.StatefulsetTemplate.Labels))
+		for key, value := range rc.Spec.StatefulsetTemplate.Labels {
+			labels[key] = value
+		}
+		objects = append(objects, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-%d", rc.Spec.StatefulsetTemplate.Name, i),
+			Namespace: rc.Namespace,
+			Labels:    labels,
+		}})
+	}
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithRuntimeObjects(rc).
+		WithRuntimeObjects(objects...).
 		WithStatusSubresource(&cachev1.RedisCluster{}).
 		Build()
 
@@ -270,6 +292,16 @@ func TestStartBlueGreenDeployment_SetsGreenName(t *testing.T) {
 	assert.Equal(t, "redis-cluster-test", rc.Status.ActiveClusterName)
 	assert.Equal(t, cachev1.BlueGreenPhaseCreatingGreen, rc.Status.BlueGreen.Phase)
 	assert.True(t, rc.Status.BlueGreen.StartTime > 0)
+
+	bluePods, err := deps.GetBluePods(context.Background(), rc)
+	require.NoError(t, err)
+	require.Len(t, bluePods.Items, 6)
+	for _, pod := range bluePods.Items {
+		assert.Equal(t, constants.BlueGreenRoleActive, pod.Labels[constants.BlueGreenRoleLabel])
+	}
+	service := &corev1.Service{}
+	require.NoError(t, deps.Get(context.Background(), types.NamespacedName{Name: rc.Name, Namespace: rc.Namespace}, service))
+	assert.Equal(t, constants.BlueGreenRoleActive, service.Spec.Selector[constants.BlueGreenRoleLabel])
 }
 
 func TestStartBlueGreenDeployment_AlternatesGreenName(t *testing.T) {
@@ -441,6 +473,8 @@ func TestBgTeardown_GreenSvcNameDerivedFromActiveCluster(t *testing.T) {
 func TestCreateGreenStatefulSet_NamesAndLabels(t *testing.T) {
 	rc := newRedisCluster("redis-cluster-test", "default", 3, 1)
 	rc.Status.Autoscaling.EffectivePrimaries = 5
+	rc.Spec.StatefulsetTemplate.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{{}}
+	rc.Spec.StatefulsetTemplate.Spec.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "data", MountPath: "/data"}}
 	scheme := newScheme(t)
 
 	fakeClient := fake.NewClientBuilder().
@@ -466,11 +500,19 @@ func TestCreateGreenStatefulSet_NamesAndLabels(t *testing.T) {
 		assert.Empty(t, greenSTS.Spec.Selector.MatchLabels[constants.BlueGreenRoleLabel])
 	}
 	assert.Empty(t, greenSTS.Spec.Template.Labels[constants.BlueGreenRoleLabel], "green STS should not have role=active initially")
-	assert.Equal(t, "redis-cluster-test", greenSTS.Spec.ServiceName, "green STS should use main service for DNS")
+	peerServiceName := redis_cluster.BlueGreenPeerServiceName(greenName)
+	assert.Equal(t, peerServiceName, greenSTS.Spec.ServiceName)
+	assert.Equal(t, greenName, greenSTS.Spec.Template.Labels[constants.BlueGreenStatefulSetLabel])
+	require.Len(t, greenSTS.Spec.Template.Spec.Containers[0].Env, 1)
+	assert.Equal(t, peerServiceName, greenSTS.Spec.Template.Spec.Containers[0].Env[0].Value)
 	require.NotNil(t, greenSTS.Spec.Replicas)
 	assert.Equal(t, int32(10), *greenSTS.Spec.Replicas, "green STS should use the retained autoscaling target")
 	require.NotNil(t, rc.Spec.StatefulsetTemplate.Spec.Replicas)
 	assert.Equal(t, int32(6), *rc.Spec.StatefulsetTemplate.Spec.Replicas, "green creation must not mutate the Helm template")
+	require.Len(t, greenSTS.Spec.VolumeClaimTemplates, 1)
+	assert.Equal(t, "data", greenSTS.Spec.VolumeClaimTemplates[0].Name)
+	assert.Empty(t, rc.Spec.StatefulsetTemplate.Spec.VolumeClaimTemplates[0].Name,
+		"restoring the green claim name must not mutate the CR template")
 	assert.NotNil(t, greenSTS.Spec.PersistentVolumeClaimRetentionPolicy)
 	assert.Equal(t, appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
 		greenSTS.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted)
@@ -531,11 +573,13 @@ func TestCreateGreenHeadlessService(t *testing.T) {
 	require.NoError(t, err)
 
 	svc := &corev1.Service{}
-	err = fakeClient.Get(ctx, types.NamespacedName{Name: greenSTSName, Namespace: "default"}, svc)
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: redis_cluster.BlueGreenPeerServiceName(greenSTSName), Namespace: "default"}, svc)
 	require.NoError(t, err)
 
 	assert.Equal(t, "None", svc.Spec.ClusterIP)
 	assert.NotEmpty(t, svc.Spec.Selector, "service should have selectors")
+	assert.Equal(t, greenSTSName, svc.Spec.Selector[constants.BlueGreenStatefulSetLabel])
+	assert.Empty(t, svc.Spec.Selector[constants.BlueGreenRoleLabel])
 }
 
 func TestCreateGreenHeadlessService_Idempotent(t *testing.T) {
@@ -572,7 +616,7 @@ func TestCreateGreenHeadlessService_UpdatesSelectorIfExists(t *testing.T) {
 
 	existingSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      greenSTSName,
+			Name:      redis_cluster.BlueGreenPeerServiceName(greenSTSName),
 			Namespace: "default",
 		},
 		Spec: corev1.ServiceSpec{
@@ -602,9 +646,11 @@ func TestCreateGreenHeadlessService_UpdatesSelectorIfExists(t *testing.T) {
 	require.NoError(t, err)
 
 	svc := &corev1.Service{}
-	err = fakeClient.Get(ctx, types.NamespacedName{Name: greenSTSName, Namespace: "default"}, svc)
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: redis_cluster.BlueGreenPeerServiceName(greenSTSName), Namespace: "default"}, svc)
 	require.NoError(t, err)
 	assert.NotEmpty(t, svc.Spec.Selector, "service should have selectors")
+	assert.Equal(t, greenSTSName, svc.Spec.Selector[constants.BlueGreenStatefulSetLabel])
+	assert.Empty(t, svc.Spec.Selector[constants.BlueGreenRoleLabel])
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -644,8 +690,18 @@ func TestDeleteGreenResources(t *testing.T) {
 	assert.Error(t, err, "StatefulSet should be deleted")
 
 	svc := &corev1.Service{}
-	err = fakeClient.Get(ctx, types.NamespacedName{Name: greenSTSName, Namespace: "default"}, svc)
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: redis_cluster.BlueGreenPeerServiceName(greenSTSName), Namespace: "default"}, svc)
 	assert.Error(t, err, "Service should be deleted")
+}
+
+func TestBlueGreenPeerServiceName(t *testing.T) {
+	assert.Equal(t, "redis-cluster-test-alt-peer", redis_cluster.BlueGreenPeerServiceName("redis-cluster-test-alt"))
+
+	longName := strings.Repeat("a", 63)
+	got := redis_cluster.BlueGreenPeerServiceName(longName)
+	assert.LessOrEqual(t, len(got), 63)
+	assert.Equal(t, got, redis_cluster.BlueGreenPeerServiceName(longName), "hashed peer service name must be stable")
+	assert.True(t, strings.HasSuffix(got, "-peer"))
 }
 
 func TestDeleteGreenResources_AlreadyGone(t *testing.T) {

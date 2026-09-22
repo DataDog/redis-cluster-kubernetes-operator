@@ -2,10 +2,12 @@ package redis_cluster
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"maps"
 	"regexp"
 	"sort"
+	"strings"
 
 	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/constants"
@@ -24,6 +26,22 @@ import (
 var (
 	podListLabelNames = []string{"app", "chart_name", "redis_cluster_name"}
 )
+
+const redisServiceNameEnv = "REDIS_SERVICE_NAME"
+
+// BlueGreenPeerServiceName returns the private headless Service used for Redis
+// node identity and gossip during a rollout. It is deliberately distinct from
+// the client-facing Service, including when the alternating StatefulSet name is
+// the original cluster name.
+func BlueGreenPeerServiceName(statefulSetName string) string {
+	const suffix = "-peer"
+	if len(statefulSetName)+len(suffix) <= 63 {
+		return statefulSetName + suffix
+	}
+	sum := sha256.Sum256([]byte(statefulSetName))
+	prefix := strings.TrimRight(statefulSetName[:49], "-")
+	return fmt.Sprintf("%s-%x%s", prefix, sum[:4], suffix)
+}
 
 func effectiveStatefulSetName(redisCluster *cachev1.RedisCluster) string {
 	if redisCluster.Status.ActiveClusterName != "" {
@@ -507,6 +525,9 @@ func (cc *ClusterClient) GetBlueOnlyCluster(ctx context.Context, redisCluster *c
 // - After BG completes, pods keep their owner reference
 func (cc *ClusterClient) CreateGreenStatefulSet(ctx context.Context, redisCluster *cachev1.RedisCluster) (*appsv1.StatefulSet, string, error) {
 	greenSTS := redisCluster.Spec.StatefulsetTemplate.DeepCopy()
+	if err := restorePrunedVolumeClaimTemplateName(greenSTS); err != nil {
+		return nil, "", err
+	}
 	replicas := redisCluster.EffectivePodCount()
 	greenSTS.Spec.Replicas = &replicas
 	activeName := redisCluster.Status.ActiveClusterName
@@ -524,11 +545,23 @@ func (cc *ClusterClient) CreateGreenStatefulSet(ctx context.Context, redisCluste
 		greenSTS.Spec.Template.Labels = make(map[string]string)
 	}
 	constants.DeactivateRole(greenSTS.Spec.Template.Labels)
+	greenSTS.Spec.Template.Labels[constants.BlueGreenStatefulSetLabel] = greenName
 
-	// Keep spec.serviceName and REDIS_SERVICE_NAME pointing to the main (blue)
-	// headless service. Green pods continue to announce through that stable
-	// Service DNS name while the green headless service remains available for
-	// pod discovery.
+	// Redis peer identity must not depend on the client-facing Service. That
+	// Service is restricted to role=active pods during a rollout, while this
+	// rollout-specific Service keeps green node hostnames resolvable before they
+	// are safe to receive client traffic.
+	peerServiceName := BlueGreenPeerServiceName(greenName)
+	greenSTS.Spec.ServiceName = peerServiceName
+	for containerIndex := range greenSTS.Spec.Template.Spec.Containers {
+		for envIndex := range greenSTS.Spec.Template.Spec.Containers[containerIndex].Env {
+			env := &greenSTS.Spec.Template.Spec.Containers[containerIndex].Env[envIndex]
+			if env.Name == redisServiceNameEnv {
+				env.Value = peerServiceName
+				env.ValueFrom = nil
+			}
+		}
+	}
 
 	// Clear resource metadata for creation
 	greenSTS.ResourceVersion = ""
@@ -573,13 +606,14 @@ func (cc *ClusterClient) CreateGreenStatefulSet(ctx context.Context, redisCluste
 	return greenSTS, greenName, nil
 }
 
-// CreateGreenHeadlessService creates a headless service for the green StatefulSet.
-// The service selector uses the app label to route traffic to green pods only.
+// CreateGreenHeadlessService creates a private peer-discovery Service for the
+// green StatefulSet. Client traffic continues to use the main Service.
 func (cc *ClusterClient) CreateGreenHeadlessService(ctx context.Context, redisCluster *cachev1.RedisCluster, greenSTSName string, redisPort int) error {
 	appLabel := redisCluster.Spec.StatefulsetTemplate.Spec.Template.Labels[constants.LabelApp]
+	peerServiceName := BlueGreenPeerServiceName(greenSTSName)
 	greenSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      greenSTSName,
+			Name:      peerServiceName,
 			Namespace: redisCluster.Namespace,
 			Labels: map[string]string{
 				constants.LabelApp:              appLabel,
@@ -589,8 +623,9 @@ func (cc *ClusterClient) CreateGreenHeadlessService(ctx context.Context, redisCl
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "None",
 			Selector: map[string]string{
-				constants.LabelApp:              appLabel,
-				constants.LabelRedisClusterName: redisCluster.Name,
+				constants.LabelApp:                  appLabel,
+				constants.LabelRedisClusterName:     redisCluster.Name,
+				constants.BlueGreenStatefulSetLabel: greenSTSName,
 			},
 			Ports: []corev1.ServicePort{
 				{
@@ -613,16 +648,28 @@ func (cc *ClusterClient) CreateGreenHeadlessService(ctx context.Context, redisCl
 		return utils.WrapErr(err, "failed to set green service controller reference")
 	}
 
-	cc.Log.Info("Creating green headless service", "name", greenSTSName,
+	cc.Log.Info("Creating green headless service", "name", peerServiceName,
 		"annotations", greenSvc.Annotations, "selector", greenSvc.Spec.Selector)
 	if err := cc.Create(ctx, greenSvc); err != nil {
 		if errors.IsAlreadyExists(err) {
-			cc.Log.Info("Green headless service already exists", "name", greenSTSName)
+			existing := &corev1.Service{}
+			if getErr := cc.Get(ctx, types.NamespacedName{Name: peerServiceName, Namespace: redisCluster.Namespace}, existing); getErr != nil {
+				return utils.WrapErr(getErr, "failed to get existing green headless service")
+			}
+			if !maps.Equal(existing.Spec.Selector, greenSvc.Spec.Selector) {
+				existing.Spec.Selector = maps.Clone(greenSvc.Spec.Selector)
+				if updateErr := cc.Update(ctx, existing); updateErr != nil {
+					return utils.WrapErr(updateErr, "failed to repair green headless service selector")
+				}
+				cc.Log.Info("Repaired green headless service selector", "name", peerServiceName)
+			} else {
+				cc.Log.Info("Green headless service already exists", "name", peerServiceName)
+			}
 			return nil
 		}
 		return utils.WrapErr(err, "failed to create green headless service")
 	}
-	cc.Log.Info("Created green headless service", "name", greenSTSName,
+	cc.Log.Info("Created green headless service", "name", peerServiceName,
 		"annotations", greenSvc.Annotations)
 	return nil
 }
@@ -713,14 +760,15 @@ func (cc *ClusterClient) DeleteGreenResources(ctx context.Context, namespace str
 
 	// Delete green headless service (only if operator-created, i.e. has ownerReferences)
 	svc := &corev1.Service{}
-	if err := cc.Get(ctx, types.NamespacedName{Name: greenSTSName, Namespace: namespace}, svc); err == nil {
+	peerServiceName := BlueGreenPeerServiceName(greenSTSName)
+	if err := cc.Get(ctx, types.NamespacedName{Name: peerServiceName, Namespace: namespace}, svc); err == nil {
 		if len(svc.OwnerReferences) > 0 {
-			cc.Log.Info("Deleting green headless service (operator-owned)", "name", greenSTSName)
+			cc.Log.Info("Deleting green headless service (operator-owned)", "name", peerServiceName)
 			if err := cc.Delete(ctx, svc); err != nil && !errors.IsNotFound(err) {
 				return utils.WrapErr(err, "failed to delete green headless service")
 			}
 		} else {
-			cc.Log.Info("Skipping service deletion — no ownerReferences (likely Helm-managed)", "name", greenSTSName)
+			cc.Log.Info("Skipping service deletion — no ownerReferences", "name", peerServiceName)
 		}
 	}
 

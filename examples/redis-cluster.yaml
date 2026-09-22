@@ -63,6 +63,8 @@ spec:
                 - /data/nodes.conf
                 - --cluster-node-timeout
                 - "5000"
+                - --cluster-announce-hostname
+                - $(POD_NAME).$(REDIS_SERVICE_NAME).$(POD_NAMESPACE).svc
                 - --dir
                 - /data
                 - --appendonly
@@ -73,6 +75,17 @@ spec:
                 - 0.0.0.0
                 - --protected-mode
                 - "no"
+              env:
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: REDIS_SERVICE_NAME
+                  value: redis-cluster-example
               ports:
                 - name: redis
                   containerPort: 6379
