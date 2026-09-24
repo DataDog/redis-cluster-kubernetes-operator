@@ -91,6 +91,45 @@ func TestBackupBackendRejectsNilFactoryResult(t *testing.T) {
 	require.ErrorContains(t, err, "returned a nil backend")
 }
 
+type backupProviderFunc func(BackendCommandExecutor) BackupStore
+
+func (f backupProviderFunc) Bind(executor BackendCommandExecutor) BackupStore {
+	return f(executor)
+}
+
+func TestBindBackupStoreRejectsNilStore(t *testing.T) {
+	var typedNil *promotionStore
+	tests := []struct {
+		name     string
+		provider BackupProvider
+	}{
+		{
+			name: "nil",
+			provider: backupProviderFunc(func(BackendCommandExecutor) BackupStore {
+				return nil
+			}),
+		},
+		{
+			name: "typed nil",
+			provider: backupProviderFunc(func(BackendCommandExecutor) BackupStore {
+				return typedNil
+			}),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := (&RedisClusterReconciler{}).bindBackupStore(
+				clusterWithSpec(cachev1.RedisClusterSpec{}),
+				tc.provider,
+				&redis_cluster.ClusterNode{PodName: "redis-0"},
+			)
+			require.ErrorContains(t, err, "returned a nil store")
+			assert.Nil(t, store)
+		})
+	}
+}
+
 func TestBackupContainerSelection(t *testing.T) {
 	r := &RedisClusterReconciler{}
 	withSidecar := cachev1.RedisClusterSpec{StatefulsetTemplate: appsv1.StatefulSet{Spec: appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "redis"}, {Name: "backup"}}}}}}}

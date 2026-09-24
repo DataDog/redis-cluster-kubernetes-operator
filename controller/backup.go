@@ -63,8 +63,12 @@ func (e podBackendCommandExecutor) Execute(ctx context.Context, command []string
 	return BackendCommandResult{ExitCode: rc, Stdout: stdout, Stderr: stderr}, err
 }
 
-func (r *RedisClusterReconciler) bindBackupStore(cluster *redis_cluster.Cluster, backend BackupProvider, node *redis_cluster.ClusterNode) BackupStore {
-	return backend.Bind(podBackendCommandExecutor{toolbox: cluster.Toolbox, node: node, container: r.backupContainer(cluster)})
+func (r *RedisClusterReconciler) bindBackupStore(cluster *redis_cluster.Cluster, backend BackupProvider, node *redis_cluster.ClusterNode) (BackupStore, error) {
+	store := backend.Bind(podBackendCommandExecutor{toolbox: cluster.Toolbox, node: node, container: r.backupContainer(cluster)})
+	if optionalProviderIsNil(store) {
+		return nil, errors.New("backup provider returned a nil store")
+	}
+	return store, nil
 }
 
 type BackupManifest struct {
@@ -279,7 +283,11 @@ func (r *RedisClusterReconciler) clearInProgressBackup(ctx context.Context, clus
 		return nil
 	}
 	execNode := cluster.AllNodes[0]
-	err := r.bindBackupStore(cluster, backend, execNode).DeletePrefix(ctx, inProgressPath)
+	store, err := r.bindBackupStore(cluster, backend, execNode)
+	if err != nil {
+		return err
+	}
+	err = store.DeletePrefix(ctx, inProgressPath)
 	if IsBackendNotFound(err) {
 		return nil
 	}
@@ -337,7 +345,10 @@ func (r *RedisClusterReconciler) promoteInProgressBackup(ctx context.Context, cl
 		return fmt.Errorf("no nodes available to promote backup")
 	}
 	execNode := cluster.AllNodes[0]
-	store := r.bindBackupStore(cluster, backend, execNode)
+	store, err := r.bindBackupStore(cluster, backend, execNode)
+	if err != nil {
+		return err
+	}
 
 	// Rotate latest -> previous. A confirmed absence is the only first-backup case.
 	latestWasRotated, err := rotateLatestToPrevious(ctx, store, latestPath, previousPath)
@@ -390,7 +401,11 @@ func (r *RedisClusterReconciler) writeBackupManifest(cluster *redis_cluster.Clus
 
 	execNode := cluster.AllNodes[0]
 	manifestRemotePath := backupPath + "/manifest.json"
-	if err := r.bindBackupStore(cluster, backend, execNode).UploadBytes(cluster.Toolbox.Context(), manifestJSON, manifestRemotePath); err != nil {
+	store, err := r.bindBackupStore(cluster, backend, execNode)
+	if err != nil {
+		return err
+	}
+	if err := store.UploadBytes(cluster.Toolbox.Context(), manifestJSON, manifestRemotePath); err != nil {
 		uploadErr := fmt.Errorf("manifest upload failed: %w", err)
 		r.Log.Error(uploadErr, "Failed to write backup manifest")
 		return uploadErr
@@ -417,7 +432,11 @@ func (r *RedisClusterReconciler) readBackupManifest(cluster *redis_cluster.Clust
 	}
 
 	execNode := cluster.AllNodes[0]
-	manifestBytes, err := r.bindBackupStore(cluster, backend, execNode).DownloadBytes(cluster.Toolbox.Context(), backupPath+"/manifest.json")
+	store, err := r.bindBackupStore(cluster, backend, execNode)
+	if err != nil {
+		return nil, err
+	}
+	manifestBytes, err := store.DownloadBytes(cluster.Toolbox.Context(), backupPath+"/manifest.json")
 	if err != nil {
 		return nil, fmt.Errorf("failed to download manifest at %s/manifest.json: %w", backupPath, err)
 	}
@@ -607,7 +626,12 @@ func (r *RedisClusterReconciler) backupExists(cluster *redis_cluster.Cluster, pa
 		if node.PodName == "" {
 			continue
 		}
-		exists, execErr := r.bindBackupStore(cluster, backend, node).Exists(cluster.Toolbox.Context(), path)
+		store, bindErr := r.bindBackupStore(cluster, backend, node)
+		if bindErr != nil {
+			lastErr = bindErr
+			continue
+		}
+		exists, execErr := store.Exists(cluster.Toolbox.Context(), path)
 		if execErr != nil {
 			lastErr = execErr
 			continue // pod-specific exec failure — try another pod
@@ -846,7 +870,10 @@ func (r *RedisClusterReconciler) uploadNodeBackup(cluster *redis_cluster.Cluster
 	}
 
 	// Uploads run on the backup container — it has the cloud CLI.
-	store := r.bindBackupStore(cluster, backend, node)
+	store, err := r.bindBackupStore(cluster, backend, node)
+	if err != nil {
+		return nil, cleanupNodesConf(err)
+	}
 	nodesPath, err := redis_cluster.BackupFileNodesConfBackup.Path()
 	if err != nil {
 		return nil, cleanupNodesConf(err)
@@ -927,7 +954,11 @@ func (r *RedisClusterReconciler) stageRestoreArtifacts(ctx context.Context, clus
 			if err != nil {
 				return fmt.Errorf("failed to resolve local path for artifact %q: %w", artifact.ObjectKey, err)
 			}
-			if err := r.bindBackupStore(cluster, backend, node).DownloadFile(stageCtx, remotePath, localPath); err != nil {
+			store, err := r.bindBackupStore(cluster, backend, node)
+			if err != nil {
+				return fmt.Errorf("failed to bind backup store for artifact %q: %w", artifact.ObjectKey, err)
+			}
+			if err := store.DownloadFile(stageCtx, remotePath, localPath); err != nil {
 				return fmt.Errorf("failed to stage artifact %q: %w", artifact.ObjectKey, err)
 			}
 			size, digest, err := cluster.Toolbox.BackupFileMetadata(stageCtx, node, entry.file)
