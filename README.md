@@ -81,6 +81,41 @@ helm upgrade --install redis-cluster-kubernetes-operator . \
 
 The Secret is mounted only into the toolbox. A fixed helper reads it inside the pod; credentials are not sent in exec arguments.
 
+## Integration defaults and embedding
+
+The reference binary supplies usable defaults when an embedding application
+does not override either integration:
+
+| `mains.ManageOptions` field | Default when omitted |
+| --- | --- |
+| `Metrics` | Prometheus on `MetricsAddr`, or no-op when `MetricsAddr` is `"0"` |
+| `BackupBackendFactory` | The built-in S3, GCS, and Azure registry; an omitted `spec.backupBackend` selects AWS S3 |
+
+An embedding application can also wire those defaults explicitly:
+
+```go
+reporter, cleanup, err := metrics.CreatePrometheusWithCleanup(ctrlmetrics.Registry)
+if err != nil {
+	return err
+}
+defer cleanup()
+
+err = mains.ManageWithOptions(scheme, log, mains.ManageOptions{
+	Context:              ctx,
+	MetricsAddr:          ":8080",
+	HealthProbeAddr:      ":8081",
+	Metrics:              reporter,
+	BackupBackendFactory: controller.NewBackupBackendRegistry(),
+})
+```
+
+To add a backup implementation while retaining the built-ins, call
+`Register` on `NewBackupBackendRegistry` during process startup and pass the
+registry as `BackupBackendFactory`. The constructor has the signature
+`func(location string) (controller.BackupProvider, error)`. To replace
+metrics, pass any implementation of `metrics.Metrics`. The compile-checked
+example in `mains/example_test.go` shows the complete explicit-default setup.
+
 ## Metrics and health
 
 Prometheus metrics are served on port `8080` by default. The optional metrics Service can be annotated through `operator.metrics.service.annotations`. Metric labels are bounded and do not include cluster, namespace, or pod names. Applications embedding the manager can supply any `metrics.Metrics` implementation and their own cancellation context through `mains.ManageWithOptions`, so Datadog, Prometheus, OpenTelemetry, StatsD, or another backend can use the same controller contract.
@@ -106,7 +141,7 @@ Backups are beta and must remain disabled unless all prerequisites are supplied:
 - Grant the workload identity permission to read, write, copy, list, and delete objects in the selected bucket or container.
 - Complete the required security review of toolbox, authentication, backup artifact integrity, and credential handling.
 
-Applications embedding the controller may inject a `controller.BackupBackendFactory` or use `controller.NewBackupBackendRegistry` to add another provider while retaining S3, GCS, and Azure. A custom provider returns a typed `controller.BackupStore`; the controller calls operations such as `UploadFile`, `DownloadFile`, `CopyPrefix`, `DeletePrefix`, and `Exists`, without accepting command templates from the RedisCluster resource. CLI-backed stores may translate those operations internally through the fixed-argv pod executor, which never adds shell wrapping or logs its arguments. Credentials must be supplied through mounted files or stdin, not argv.
+Applications embedding the controller may inject a `controller.BackupBackendFactory` or use `controller.NewBackupBackendRegistry` to add another provider while retaining S3, GCS, and Azure. The factory returns a trusted in-process `controller.BackupProvider`; binding it to the pod executor produces a typed `controller.BackupStore`. The controller calls operations such as `UploadFile`, `DownloadFile`, `CopyPrefix`, `DeletePrefix`, and `Exists`, without accepting command templates from the RedisCluster resource. CLI-backed stores may translate those operations internally through the fixed-argv pod executor, which never adds shell wrapping or logs its arguments. Credentials must be supplied through mounted files or stdin, not argv.
 
 Before using a custom provider name on an existing installation, apply the updated RedisCluster CRD. Helm does not replace CRDs from the chart's `crds/` directory during a normal upgrade.
 
