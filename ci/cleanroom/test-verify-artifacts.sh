@@ -42,6 +42,11 @@ expect_rejected_without_disclosure \
   "field-secret-$HEX36" \
   "password=field-secret-$HEX36"
 
+expect_rejected_without_disclosure \
+  "json-credential-field" \
+  "json-secret-$HEX36" \
+  "{\"password\":\"json-secret-$HEX36\"}"
+
 for prefix in cleanroom- p- wrong- missing-; do
   expect_rejected_without_disclosure \
     "canary-${prefix%-}" \
