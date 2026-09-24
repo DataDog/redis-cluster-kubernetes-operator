@@ -78,13 +78,29 @@ func redactCommand(command []string) []string {
 	return out
 }
 
-func execStreamFailure(log logr.Logger, err error, _ string, _ string) error {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
+func execTransportFailure(log logr.Logger, err error, operation string, exposeDetails bool) error {
+	if errors.Is(err, context.Canceled) {
+		if exposeDetails {
+			return err
+		}
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		if exposeDetails {
+			return err
+		}
+		return context.DeadlineExceeded
 	}
 	execErr := newExecError(err)
-	log.Error(execErr, "Failed exec.Stream", "err", reflect.TypeOf(err))
-	return utils.WrapErr(execErr, "failed exec.Stream")
+	if !exposeDetails {
+		execErr.cause = errors.New("exec transport error (details omitted)")
+	}
+	log.Error(execErr, "Failed "+operation, "err", reflect.TypeOf(err))
+	return utils.WrapErr(execErr, "failed "+operation)
+}
+
+func execStreamFailure(log logr.Logger, err error, _ string, _ string, exposeDetails bool) error {
+	return execTransportFailure(log, err, "exec.Stream", exposeDetails)
 }
 
 // Exec provides support for executing k8s commands.
@@ -150,9 +166,7 @@ func (c *Exec) exec(ctx context.Context, podName string, containerName string, c
 
 	exec, err := remotecommand.NewSPDYExecutor(c.config, "POST", req.URL())
 	if err != nil {
-		execErr := newExecError(err)
-		log.Error(execErr, "Failed remotecommand.NewSPDYExecutor")
-		return 0, "", "", utils.WrapErr(execErr, "failed remotecommand.NewSPDYExecutor")
+		return 0, "", "", execTransportFailure(log, err, "remotecommand.NewSPDYExecutor", logArguments)
 	}
 
 	var stdout, stderr strings.Builder
@@ -178,7 +192,7 @@ func (c *Exec) exec(ctx context.Context, podName string, containerName string, c
 		} else {
 			// Captured output can contain streamed manifests or provider-sensitive
 			// diagnostics. The failure helper deliberately ignores both streams.
-			return 0, "", "", execStreamFailure(log, err, strout, strerr)
+			return 0, "", "", execStreamFailure(log, err, strout, strerr, logArguments)
 		}
 	}
 
