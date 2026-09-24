@@ -32,14 +32,13 @@ contains_unredacted_credential() {
     awk -v field="$credential_field" '
       BEGIN {
         redacted = field "[\"\047]?[[]redacted[]][\"\047]?([,}]|[[:space:]]|$)"
-        credential = field "[^[:space:]]+"
       }
       {
         line = tolower($0)
         while (match(line, redacted)) {
           line = substr(line, 1, RSTART - 1) " " substr(line, RSTART + RLENGTH)
         }
-        if (line ~ credential) {
+        if (line ~ field) {
           unsafe = 1
         }
       }
