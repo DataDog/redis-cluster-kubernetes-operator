@@ -63,6 +63,13 @@ type BackendCommandExecutor interface {
 	Execute(context.Context, []string, []byte) (BackendCommandResult, error)
 }
 
+// BackendCommandExecutorIdentity optionally identifies the execution environment
+// behind an executor. The value must be stable for executors that share process
+// state, such as multiple command sessions in the same pod and container.
+type BackendCommandExecutorIdentity interface {
+	BackendCommandExecutorID() string
+}
+
 // BackupProvider binds provider-specific object storage operations to the pod
 // and container selected by the controller. Custom providers only need to
 // implement this interface.
@@ -504,16 +511,35 @@ func (s *gcsStore) Exists(ctx context.Context, p string) (bool, error) {
 
 type azureBackend struct {
 	container string
-	// All bound stores share one Azure CLI config directory.
-	authMu sync.Mutex
+	// Executors without an identity use the conservative shared lock. Identified
+	// executors share a lock only when they address the same pod and container.
+	authMu    sync.Mutex
+	authMuMap sync.Map
 }
 type azureStore struct {
 	backend  *azureBackend
 	executor BackendCommandExecutor
+	authMu   *sync.Mutex
 }
 
 func (b *azureBackend) Bind(e BackendCommandExecutor) BackupStore {
-	return &azureStore{backend: b, executor: e}
+	return &azureStore{backend: b, executor: e, authMu: b.authLock(e)}
+}
+func (b *azureBackend) authLock(e BackendCommandExecutor) *sync.Mutex {
+	identified, ok := e.(BackendCommandExecutorIdentity)
+	if !ok {
+		return &b.authMu
+	}
+	identity := identified.BackendCommandExecutorID()
+	if identity == "" {
+		return &b.authMu
+	}
+	lock, _ := b.authMuMap.LoadOrStore(identity, &sync.Mutex{})
+	mutex, ok := lock.(*sync.Mutex)
+	if !ok {
+		return &b.authMu
+	}
+	return mutex
 }
 func (b *azureBackend) URI(p string) (string, error) {
 	if err := validateRemotePath(p); err != nil {
@@ -529,8 +555,8 @@ func (s *azureStore) run(ctx context.Context, operation string, args []string, i
 	return runCommand(ctx, backendAzure, s.executor, operation, append([]string{"env", "AZURE_CONFIG_DIR=/tmp/.azure", "az"}, args...), input)
 }
 func (s *azureStore) runAuthenticated(ctx context.Context, operation string, args []string, input []byte) (BackendCommandResult, error) {
-	s.backend.authMu.Lock()
-	defer s.backend.authMu.Unlock()
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
 
 	if err := s.login(ctx); err != nil {
 		return BackendCommandResult{}, err
@@ -575,8 +601,8 @@ func (s *azureStore) DeletePrefix(ctx context.Context, p string) error {
 	if err := validateRemotePath(p); err != nil {
 		return err
 	}
-	s.backend.authMu.Lock()
-	defer s.backend.authMu.Unlock()
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
 
 	if err := s.login(ctx); err != nil {
 		return err
@@ -606,8 +632,8 @@ func (s *azureStore) CopyPrefix(ctx context.Context, src, dst string) error {
 	if err := validateRemotePath(dst); err != nil {
 		return err
 	}
-	s.backend.authMu.Lock()
-	defer s.backend.authMu.Unlock()
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
 
 	if err := s.login(ctx); err != nil {
 		return err

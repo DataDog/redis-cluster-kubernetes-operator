@@ -274,6 +274,7 @@ func TestAzureDownloadBytesWritesBlobToStdoutWithoutMetadata(t *testing.T) {
 
 type blockingAzureExecutor struct {
 	mu          sync.Mutex
+	identity    string
 	calls       int
 	blockOnCall int
 	blocked     chan struct{}
@@ -281,6 +282,10 @@ type blockingAzureExecutor struct {
 	firstCall   chan struct{}
 	firstOnce   sync.Once
 	responses   []BackendCommandResult
+}
+
+func (e *blockingAzureExecutor) BackendCommandExecutorID() string {
+	return e.identity
 }
 
 func (e *blockingAzureExecutor) Execute(_ context.Context, _ []string, _ []byte) (BackendCommandResult, error) {
@@ -306,7 +311,7 @@ func (e *blockingAzureExecutor) Execute(_ context.Context, _ []string, _ []byte)
 	return response, nil
 }
 
-func TestAzureBackendSerializesAuthenticatedCommandSequences(t *testing.T) {
+func TestAzureBackendSerializesAuthenticatedCommandSequencesPerExecutorIdentity(t *testing.T) {
 	tests := []struct {
 		name      string
 		responses []BackendCommandResult
@@ -344,6 +349,7 @@ func TestAzureBackendSerializesAuthenticatedCommandSequences(t *testing.T) {
 			blocked := make(chan struct{})
 			release := make(chan struct{})
 			firstExec := &blockingAzureExecutor{
+				identity:    "pod-a/backup",
 				blockOnCall: 2,
 				blocked:     blocked,
 				release:     release,
@@ -351,6 +357,7 @@ func TestAzureBackendSerializesAuthenticatedCommandSequences(t *testing.T) {
 			}
 			secondCalled := make(chan struct{})
 			secondExec := &blockingAzureExecutor{
+				identity:  "pod-a/backup",
 				firstCall: secondCalled,
 				responses: []BackendCommandResult{{}, {Stdout: "cluster/latest/object"}},
 			}
@@ -381,6 +388,50 @@ func TestAzureBackendSerializesAuthenticatedCommandSequences(t *testing.T) {
 			assert.False(t, overlapped, "a second Azure command started while an authenticated sequence was still running")
 		})
 	}
+}
+
+func TestAzureBackendAllowsAuthenticatedCommandsForDifferentExecutorIdentities(t *testing.T) {
+	backend, err := NewAzureBackupBackend("my-container")
+	require.NoError(t, err)
+
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	firstExec := &blockingAzureExecutor{
+		identity:    "pod-a/backup",
+		blockOnCall: 2,
+		blocked:     blocked,
+		release:     release,
+		responses:   []BackendCommandResult{{}, {Stdout: "cluster/latest/object"}},
+	}
+	secondCalled := make(chan struct{})
+	secondExec := &blockingAzureExecutor{
+		identity:  "pod-b/backup",
+		firstCall: secondCalled,
+		responses: []BackendCommandResult{{}, {Stdout: "cluster/latest/object"}},
+	}
+
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := backend.Bind(firstExec).Exists(context.Background(), "cluster/latest")
+		firstResult <- err
+	}()
+	<-blocked
+
+	secondResult := make(chan error, 1)
+	go func() {
+		_, err := backend.Bind(secondExec).Exists(context.Background(), "cluster/latest")
+		secondResult <- err
+	}()
+
+	select {
+	case <-secondCalled:
+	case <-time.After(time.Second):
+		t.Fatal("Azure command for a different executor identity was serialized")
+	}
+
+	close(release)
+	require.NoError(t, <-firstResult)
+	require.NoError(t, <-secondResult)
 }
 
 func TestS3FailureCannotBeSwallowed(t *testing.T) {

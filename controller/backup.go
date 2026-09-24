@@ -35,6 +35,13 @@ type podBackendCommandExecutor struct {
 	container string
 }
 
+func (e podBackendCommandExecutor) BackendCommandExecutorID() string {
+	if e.node == nil {
+		return ""
+	}
+	return e.node.PodName + "\x00" + e.container
+}
+
 func (e podBackendCommandExecutor) Execute(ctx context.Context, command []string, input []byte) (BackendCommandResult, error) {
 	rc, stdout, stderr, err := e.toolbox.RunBackupCommand(ctx, e.node, e.container, command, input)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
