@@ -594,7 +594,7 @@ func (s *azureStore) DownloadBytes(ctx context.Context, remote string) ([]byte, 
 	if err := validateRemotePath(remote); err != nil {
 		return nil, err
 	}
-	result, err := s.runAuthenticated(ctx, "download", []string{"storage", "blob", "download", "--auth-mode", "login", "--overwrite", "true", "--container-name", s.backend.container, "--name", remote, "--file", "/dev/stdout", "--output", "none", "--only-show-errors"}, nil)
+	result, err := s.runAuthenticated(ctx, "download", []string{"storage", "blob", "download", "--auth-mode", "login", "--overwrite", "true", "--container-name", s.backend.container, "--name", remote, "--file", "/dev/stdout", "--max-connections", "1", "--output", "none", "--only-show-errors"}, nil)
 	return []byte(result.Stdout), err
 }
 func (s *azureStore) DeletePrefix(ctx context.Context, p string) error {

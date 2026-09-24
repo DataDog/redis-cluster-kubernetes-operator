@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"errors"
+	"reflect"
 	"sync"
 
 	"github.com/DataDog/redis-cluster-kubernetes-operator/health"
@@ -10,6 +12,9 @@ import (
 // WithErrorLogging logs the first delivery failure from each Metrics method.
 // RedisCluster-scoped reporters share the same suppression state.
 func WithErrorLogging(reporter Metrics, log logr.Logger) Metrics {
+	if isNilMetrics(reporter) {
+		reporter = &failedMetrics{err: errNilMetricsReporter}
+	}
 	return &errorLoggingMetrics{
 		reporter: reporter,
 		log:      log,
@@ -18,6 +23,11 @@ func WithErrorLogging(reporter Metrics, log logr.Logger) Metrics {
 		},
 	}
 }
+
+var (
+	errNilMetricsReporter        = errors.New("metrics reporter is nil")
+	errNilClusterMetricsReporter = errors.New("metrics reporter returned nil from WithRedisCluster")
+)
 
 type errorLoggingMetrics struct {
 	reporter Metrics
@@ -31,12 +41,42 @@ type metricsErrorLogState struct {
 }
 
 func (m *errorLoggingMetrics) WithRedisCluster(name string) Metrics {
+	reporter := m.reporter.WithRedisCluster(name)
+	if isNilMetrics(reporter) {
+		reporter = &failedMetrics{err: errNilClusterMetricsReporter}
+	}
 	return &errorLoggingMetrics{
-		reporter: m.reporter.WithRedisCluster(name),
+		reporter: reporter,
 		log:      m.log,
 		state:    m.state,
 	}
 }
+
+func isNilMetrics(reporter Metrics) bool {
+	if reporter == nil {
+		return true
+	}
+	value := reflect.ValueOf(reporter)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+type failedMetrics struct {
+	err error
+}
+
+func (m *failedMetrics) WithRedisCluster(string) Metrics               { return m }
+func (m *failedMetrics) Count(string) error                            { return m.err }
+func (m *failedMetrics) CountBadSituation(string, ...string) error     { return m.err }
+func (m *failedMetrics) CountToolboxOperation(string) error            { return m.err }
+func (m *failedMetrics) CountAutoscalingDecision(string, string) error { return m.err }
+func (m *failedMetrics) ReportHealth(health.ClusterHealth) error       { return m.err }
+func (m *failedMetrics) Gauge(string, float64, ...string) error        { return m.err }
+func (m *failedMetrics) Timing(string, int64, ...string) error         { return m.err }
 
 func (m *errorLoggingMetrics) Count(counter string) error {
 	return m.logFirstError("Count", m.reporter.Count(counter))

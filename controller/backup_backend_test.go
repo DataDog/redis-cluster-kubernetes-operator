@@ -267,8 +267,8 @@ func TestAzureDownloadBytesWritesBlobToStdoutWithoutMetadata(t *testing.T) {
 	assert.Equal(t, []string{
 		"env", "AZURE_CONFIG_DIR=/tmp/.azure", "az", "storage", "blob", "download",
 		"--auth-mode", "login", "--overwrite", "true", "--container-name", "my-container",
-		"--name", "cluster/latest/manifest.json", "--file", "/dev/stdout", "--output", "none",
-		"--only-show-errors",
+		"--name", "cluster/latest/manifest.json", "--file", "/dev/stdout", "--max-connections", "1",
+		"--output", "none", "--only-show-errors",
 	}, exec.calls[1].argv)
 }
 

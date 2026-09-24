@@ -39,6 +39,37 @@ func TestWithErrorLoggingLogsFirstFailurePerOperationAcrossChildren(t *testing.T
 	require.Equal(t, 2, childReporter.gaugeCalls)
 }
 
+func TestWithErrorLoggingHandlesNilReporters(t *testing.T) {
+	var typedNil *failingMetrics
+	tests := []struct {
+		name     string
+		reporter Metrics
+		wantErr  error
+		child    bool
+	}{
+		{name: "nil reporter", wantErr: errNilMetricsReporter},
+		{name: "typed nil reporter", reporter: typedNil, wantErr: errNilMetricsReporter},
+		{name: "nil child", reporter: &failingMetrics{}, wantErr: errNilClusterMetricsReporter, child: true},
+		{name: "typed nil child", reporter: &failingMetrics{child: typedNil}, wantErr: errNilClusterMetricsReporter, child: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs strings.Builder
+			reporter := WithErrorLogging(tc.reporter, funcr.New(func(prefix, args string) {
+				logs.WriteString(prefix)
+				logs.WriteString(args)
+			}, funcr.Options{}))
+			if tc.child {
+				reporter = reporter.WithRedisCluster("cache")
+			}
+
+			require.ErrorIs(t, reporter.Count("operation"), tc.wantErr)
+			require.Contains(t, logs.String(), "Metrics delivery failed")
+		})
+	}
+}
+
 type failingMetrics struct {
 	err                   error
 	child                 Metrics
