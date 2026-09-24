@@ -25,6 +25,24 @@ func TestExecStreamFailureDoesNotLogCapturedOutput(t *testing.T) {
 	}
 }
 
+func TestExecWithInputCommandLogOmitsProviderArguments(t *testing.T) {
+	const credential = "https://storage.example/backup?signature=secret-token"
+	var logs strings.Builder
+	log := funcr.New(func(prefix, args string) {
+		logs.WriteString(prefix)
+		logs.WriteString(args)
+	}, funcr.Options{Verbosity: 1})
+
+	logExecCommand(log, "redis-0", "backup", []string{"rclone", "copyto", "-", credential}, false)
+	combined := logs.String()
+	if strings.Contains(combined, credential) || strings.Contains(combined, "secret-token") {
+		t.Fatalf("provider argument leaked through command logging: %s", combined)
+	}
+	if !strings.Contains(combined, "rclone") || !strings.Contains(combined, "argumentCount") {
+		t.Fatalf("safe command summary missing: %s", combined)
+	}
+}
+
 func TestExecErrorClassification(t *testing.T) {
 	tests := []struct {
 		message string

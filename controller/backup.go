@@ -36,26 +36,7 @@ type podBackendCommandExecutor struct {
 }
 
 func (e podBackendCommandExecutor) Execute(ctx context.Context, command []string, input []byte) (BackendCommandResult, error) {
-	if len(command) == 0 {
-		return BackendCommandResult{}, &backendCommandTransportError{Kind: BackendFailure}
-	}
-	var cli redis_cluster.ObjectStoreCLI
-	args := command[1:]
-	switch command[0] {
-	case "aws":
-		cli = redis_cluster.ObjectStoreAWS
-	case "gcloud":
-		cli = redis_cluster.ObjectStoreGCloud
-	case "env":
-		if len(command) < 3 || command[1] != "AZURE_CONFIG_DIR=/tmp/.azure" || command[2] != "az" {
-			return BackendCommandResult{}, &backendCommandTransportError{Kind: BackendFailure}
-		}
-		cli = redis_cluster.ObjectStoreAzure
-		args = command[3:]
-	default:
-		return BackendCommandResult{}, &backendCommandTransportError{Kind: BackendFailure}
-	}
-	rc, stdout, stderr, err := e.toolbox.RunObjectStoreCommand(ctx, e.node, e.container, cli, args, input)
+	rc, stdout, stderr, err := e.toolbox.RunBackupCommand(ctx, e.node, e.container, command, input)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return BackendCommandResult{ExitCode: rc, Stdout: stdout, Stderr: stderr}, err
 	}
@@ -70,12 +51,12 @@ func (e podBackendCommandExecutor) Execute(ctx context.Context, command []string
 				kind = BackendNetwork
 			}
 		}
-		err = &backendCommandTransportError{Kind: kind}
+		err = &BackendError{Kind: kind, Operation: "execute"}
 	}
 	return BackendCommandResult{ExitCode: rc, Stdout: stdout, Stderr: stderr}, err
 }
 
-func (r *RedisClusterReconciler) bindBackupStore(cluster *redis_cluster.Cluster, backend BackupBackend, node *redis_cluster.ClusterNode) ObjectStore {
+func (r *RedisClusterReconciler) bindBackupStore(cluster *redis_cluster.Cluster, backend BackupProvider, node *redis_cluster.ClusterNode) BackupStore {
 	return backend.Bind(podBackendCommandExecutor{toolbox: cluster.Toolbox, node: node, container: r.backupContainer(cluster)})
 }
 
@@ -106,16 +87,26 @@ type BackupSlotRange struct {
 	Last  int `json:"last"`
 }
 
-func (r *RedisClusterReconciler) backupBucket(cluster *redis_cluster.Cluster) string {
+func (r *RedisClusterReconciler) backupLocation() string {
 	return os.Getenv("BACKUP_BUCKET")
 }
 
-func (r *RedisClusterReconciler) backupBackend(cluster *redis_cluster.Cluster) (BackupBackend, error) {
-	bucket := r.backupBucket(cluster)
-	if bucket == "" {
-		return nil, fmt.Errorf("no backup bucket configured")
+func (r *RedisClusterReconciler) backupBackend(cluster *redis_cluster.Cluster) (BackupProvider, error) {
+	location := r.backupLocation()
+	factory := r.BackupBackendFactory
+	if factory == nil {
+		factory = NewBackupBackendRegistry()
+	} else if optionalProviderIsNil(factory) {
+		return nil, errors.New("backup backend factory is nil")
 	}
-	return newBackupBackend(cluster.RedisCluster.Spec.BackupBackend, bucket)
+	backend, err := factory.NewBackupBackend(cluster.RedisCluster.Spec.BackupBackend, location)
+	if err != nil {
+		return nil, err
+	}
+	if optionalProviderIsNil(backend) {
+		return nil, errors.New("backup backend factory returned a nil backend")
+	}
+	return backend, nil
 }
 
 // backupContainer returns the container to use for cloud storage and file operations.
@@ -163,7 +154,7 @@ func (r *RedisClusterReconciler) backup(ctx context.Context, cluster *redis_clus
 	if err != nil {
 		return false, err
 	}
-	bucket := r.backupBucket(cluster)
+	location := r.backupLocation()
 
 	latestPath := r.latestBackupPath(cluster)
 	previousPath := r.previousBackupPath(cluster)
@@ -179,7 +170,7 @@ func (r *RedisClusterReconciler) backup(ctx context.Context, cluster *redis_clus
 
 	backupStart := time.Now()
 
-	r.Log.Info("Starting backup", "clusterName", cluster.RedisCluster.Name, "bucket", bucket,
+	r.Log.Info("Starting backup", "clusterName", cluster.RedisCluster.Name, "location", location,
 		"backend", cluster.RedisCluster.Spec.BackupBackend, "path", inProgressPath, "nodeCount", len(cluster.AllNodes))
 
 	var eg errgroup.Group
@@ -266,7 +257,7 @@ func (r *RedisClusterReconciler) backup(ctx context.Context, cluster *redis_clus
 
 	cluster.RedisCluster.Status.LastBackupPath = latestPath
 
-	r.Log.Info("Backup completed", "totalNodes", len(cluster.AllNodes), "duration_ms", totalDuration.Milliseconds(), "bucket", bucket, "path", latestPath)
+	r.Log.Info("Backup completed", "totalNodes", len(cluster.AllNodes), "duration_ms", totalDuration.Milliseconds(), "location", location, "path", latestPath)
 	_ = r.Metrics.Count(counters.ClusterBackedUp)
 	_ = r.Metrics.Timing(metrics.TimingBackupDuration, totalDuration.Milliseconds())
 	_ = r.Metrics.Gauge(metrics.GaugeBackupNodeCount, float64(len(cluster.AllNodes)))
@@ -276,7 +267,7 @@ func (r *RedisClusterReconciler) backup(ctx context.Context, cluster *redis_clus
 }
 
 // clearInProgressBackup removes any leftover in-progress prefix from a prior interrupted backup.
-func (r *RedisClusterReconciler) clearInProgressBackup(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, inProgressPath string) error {
+func (r *RedisClusterReconciler) clearInProgressBackup(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupProvider, inProgressPath string) error {
 	if len(cluster.AllNodes) == 0 {
 		return nil
 	}
@@ -290,7 +281,7 @@ func (r *RedisClusterReconciler) clearInProgressBackup(ctx context.Context, clus
 
 // replaceLatestWithInProgress keeps the staged backup when its copy fails and, when
 // latest was successfully rotated, restores that generation after clearing any partial copy.
-func replaceLatestWithInProgress(ctx context.Context, store ObjectStore, inProgressPath, latestPath, previousPath string, latestWasRotated bool) error {
+func replaceLatestWithInProgress(ctx context.Context, store BackupStore, inProgressPath, latestPath, previousPath string, latestWasRotated bool) error {
 	if err := store.DeletePrefix(ctx, latestPath); err != nil && !IsBackendNotFound(err) {
 		return fmt.Errorf("failed to clear latest before promotion: %w", err)
 	}
@@ -314,7 +305,7 @@ func replaceLatestWithInProgress(ctx context.Context, store ObjectStore, inProgr
 	return nil
 }
 
-func rotateLatestToPrevious(ctx context.Context, store ObjectStore, latestPath, previousPath string) (bool, error) {
+func rotateLatestToPrevious(ctx context.Context, store BackupStore, latestPath, previousPath string) (bool, error) {
 	latestExists, err := store.Exists(ctx, latestPath)
 	if err != nil {
 		return false, fmt.Errorf("failed to determine whether latest backup exists: %w", err)
@@ -334,7 +325,7 @@ func rotateLatestToPrevious(ctx context.Context, store ObjectStore, latestPath, 
 // promoteInProgressBackup rotates previous<-latest then latest<-in-progress. Called only for
 // a complete backup. If promotion fails after rotating latest, the previous generation is
 // restored; the staged in-progress backup is retained for diagnosis or retry.
-func (r *RedisClusterReconciler) promoteInProgressBackup(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, inProgressPath, latestPath, previousPath string) error {
+func (r *RedisClusterReconciler) promoteInProgressBackup(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupProvider, inProgressPath, latestPath, previousPath string) error {
 	if len(cluster.AllNodes) == 0 {
 		return fmt.Errorf("no nodes available to promote backup")
 	}
@@ -357,7 +348,7 @@ func (r *RedisClusterReconciler) promoteInProgressBackup(ctx context.Context, cl
 	return nil
 }
 
-func (r *RedisClusterReconciler) writeBackupManifest(cluster *redis_cluster.Cluster, backend BackupBackend, backupPath string, artifacts []BackupArtifact, failedNodes []int, duration time.Duration) error {
+func (r *RedisClusterReconciler) writeBackupManifest(cluster *redis_cluster.Cluster, backend BackupProvider, backupPath string, artifacts []BackupArtifact, failedNodes []int, duration time.Duration) error {
 	if len(cluster.AllNodes) == 0 {
 		return fmt.Errorf("no nodes available to write backup manifest")
 	}
@@ -711,7 +702,7 @@ func (r *RedisClusterReconciler) restoreStagedNodes(cluster *redis_cluster.Clust
 	r.Log.Info("Restore completed",
 		"restored", successCount, "failed", len(failedNodes),
 		"targetedNodes", len(nodes), "duration_ms", totalDuration.Milliseconds(),
-		"restorePath", restorePath, "bucket", r.backupBucket(cluster))
+		"restorePath", restorePath, "location", r.backupLocation())
 	return nil
 }
 
@@ -827,7 +818,7 @@ func (r *RedisClusterReconciler) triggerBGSave(cluster *redis_cluster.Cluster, n
 	return fmt.Errorf("lastsave not updated after 10 minutes")
 }
 
-func (r *RedisClusterReconciler) uploadNodeBackup(cluster *redis_cluster.Cluster, node *redis_cluster.ClusterNode, backend BackupBackend, nodePrefix string) ([]BackupArtifact, error) {
+func (r *RedisClusterReconciler) uploadNodeBackup(cluster *redis_cluster.Cluster, node *redis_cluster.ClusterNode, backend BackupProvider, nodePrefix string) ([]BackupArtifact, error) {
 	if err := cluster.Toolbox.PrepareNodesConfBackup(node); err != nil {
 		return nil, fmt.Errorf("failed to sanitize nodes.conf: %w", err)
 	}
@@ -899,7 +890,7 @@ type stagedArtifactKey struct {
 	kind    string
 }
 
-func (r *RedisClusterReconciler) stageRestoreArtifacts(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, restorePath string, manifest *BackupManifest) (map[stagedArtifactKey]stagedBackupArtifact, error) {
+func (r *RedisClusterReconciler) stageRestoreArtifacts(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupProvider, restorePath string, manifest *BackupManifest) (map[stagedArtifactKey]stagedBackupArtifact, error) {
 	nodesByOrdinal := make(map[int]*redis_cluster.ClusterNode, len(cluster.AllNodes))
 	for _, node := range cluster.AllNodes {
 		nodesByOrdinal[node.PodIndex] = node

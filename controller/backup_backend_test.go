@@ -21,6 +21,14 @@ type recordingBackendExecutor struct {
 	errors    []error
 }
 
+type stubBackupBackend struct{}
+
+func (stubBackupBackend) Bind(BackendCommandExecutor) BackupStore { return &promotionStore{} }
+
+var _ BackupProvider = stubBackupBackend{}
+
+var defaultBackupBackends = NewBackupBackendRegistry()
+
 func (e *recordingBackendExecutor) Execute(_ context.Context, argv []string, input []byte) (BackendCommandResult, error) {
 	e.calls = append(e.calls, commandCall{argv: append([]string(nil), argv...), stdin: append([]byte(nil), input...)})
 	i := len(e.calls) - 1
@@ -47,17 +55,84 @@ func TestNewBackupBackendValidatesProviderNames(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.kind+"/"+tc.name, func(t *testing.T) {
-			_, err := newBackupBackend(tc.kind, tc.name)
+			_, err := defaultBackupBackends.NewBackupBackend(tc.kind, tc.name)
 			assert.Equal(t, tc.valid, err == nil)
 		})
 	}
+}
+
+func TestBackupBackendRegistrySupportsCustomProviders(t *testing.T) {
+	registry := NewBackupBackendRegistry()
+	var gotLocation string
+	require.NoError(t, registry.Register("custom", func(location string) (BackupProvider, error) {
+		gotLocation = location
+		return stubBackupBackend{}, nil
+	}))
+
+	backend, err := registry.NewBackupBackend("custom", "tenant-backups")
+	require.NoError(t, err)
+	assert.IsType(t, stubBackupBackend{}, backend)
+	assert.Equal(t, "tenant-backups", gotLocation)
+
+	for _, tc := range []struct {
+		provider string
+		location string
+		want     BackupProvider
+	}{
+		{provider: "", location: "my-bucket", want: &s3Backend{}},
+		{provider: "s3", location: "my-bucket", want: &s3Backend{}},
+		{provider: "gcs", location: "my-bucket", want: &gcsBackend{}},
+		{provider: "azure", location: "my-container", want: &azureBackend{}},
+	} {
+		t.Run("built-in/"+tc.provider, func(t *testing.T) {
+			backend, err := registry.NewBackupBackend(tc.provider, tc.location)
+			require.NoError(t, err)
+			assert.IsType(t, tc.want, backend)
+		})
+	}
+
+	_, err = registry.NewBackupBackend("missing", "tenant-backups")
+	require.ErrorContains(t, err, `unknown backup provider "missing"`)
+}
+
+func TestBackupBackendRegistryRejectsInvalidRegistrations(t *testing.T) {
+	registry := NewBackupBackendRegistry()
+	provider := BackupBackendProviderFunc(func(string) (BackupProvider, error) { return stubBackupBackend{}, nil })
+
+	require.Error(t, registry.Register("", provider))
+	require.Error(t, registry.Register("UPPERCASE", provider))
+	require.Error(t, registry.Register("custom", nil))
+	require.NoError(t, registry.Register("custom", provider))
+	require.Error(t, registry.Register("custom", provider))
+}
+
+func TestBackupBackendRegistryRejectsConstructorFailures(t *testing.T) {
+	registry := NewBackupBackendRegistry()
+	wantErr := errors.New("construction failed")
+	require.NoError(t, registry.Register("failure", func(string) (BackupProvider, error) { return nil, wantErr }))
+	require.NoError(t, registry.Register("nil", func(string) (BackupProvider, error) { return nil, nil }))
+	var typedNil *s3Backend
+	require.NoError(t, registry.Register("typed-nil", func(string) (BackupProvider, error) { return typedNil, nil }))
+
+	_, err := registry.NewBackupBackend("failure", "location")
+	require.ErrorIs(t, err, wantErr)
+	_, err = registry.NewBackupBackend("nil", "location")
+	require.ErrorContains(t, err, "returned a nil backend")
+	_, err = registry.NewBackupBackend("typed-nil", "location")
+	require.ErrorContains(t, err, "returned a nil backend")
+}
+
+func TestDefaultBackupBackendRegistryUsesAWSForEmptyProvider(t *testing.T) {
+	backend, err := defaultBackupBackends.NewBackupBackend("", "my-bucket")
+	require.NoError(t, err)
+	assert.IsType(t, &s3Backend{}, backend)
 }
 
 func TestAllBackendsUseFixedArgvWithoutShell(t *testing.T) {
 	backends := []struct{ kind, name, executable string }{{"s3", "my-bucket", "aws"}, {"gcs", "my-bucket", "gcloud"}, {"azure", "my-container", "env"}}
 	for _, tc := range backends {
 		t.Run(tc.kind, func(t *testing.T) {
-			backend, err := newBackupBackend(tc.kind, tc.name)
+			backend, err := defaultBackupBackends.NewBackupBackend(tc.kind, tc.name)
 			require.NoError(t, err)
 			exec := &recordingBackendExecutor{responses: []BackendCommandResult{{}, {}, {}, {}, {}, {Stdout: "cluster/latest/object"}, {}, {}, {}, {}, {}, {}}}
 			store := backend.Bind(exec)
@@ -85,7 +160,7 @@ func TestRemotePathsRejectedBeforeExecForEveryBackend(t *testing.T) {
 		if kind == "azure" {
 			name = "my-container"
 		}
-		backend, err := newBackupBackend(kind, name)
+		backend, err := defaultBackupBackends.NewBackupBackend(kind, name)
 		require.NoError(t, err)
 		for _, value := range invalid {
 			t.Run(kind+"/"+value, func(t *testing.T) {
@@ -99,7 +174,7 @@ func TestRemotePathsRejectedBeforeExecForEveryBackend(t *testing.T) {
 }
 
 func TestLocalPathsRejectOptionAndInjectionBeforeExec(t *testing.T) {
-	backend, err := newBackupBackend("s3", "my-bucket")
+	backend, err := defaultBackupBackends.NewBackupBackend("s3", "my-bucket")
 	require.NoError(t, err)
 	for _, value := range []string{"-file", "relative/file", "/mnt/../etc/passwd", "/mnt/redis/a;id", "/mnt/redis/-option"} {
 		exec := &recordingBackendExecutor{}
@@ -120,9 +195,9 @@ func TestBackendErrorClassificationIsFailClosed(t *testing.T) {
 		{"NoSuchKey", nil, BackendNotFound},
 		{"unexpected provider failure", nil, BackendFailure},
 		{"", errors.New("untyped executor failure"), BackendFailure},
-		{"", &backendCommandTransportError{Kind: BackendAuthentication}, BackendAuthentication},
-		{"", &backendCommandTransportError{Kind: BackendNetwork}, BackendNetwork},
-		{"", &backendCommandTransportError{Kind: BackendFailure}, BackendFailure},
+		{"", &BackendError{Kind: BackendAuthentication, Operation: "execute"}, BackendAuthentication},
+		{"", &BackendError{Kind: BackendNetwork, Operation: "execute"}, BackendNetwork},
+		{"", &BackendError{Kind: BackendFailure, Operation: "execute"}, BackendFailure},
 	}
 	for _, tc := range tests {
 		err := classifyBackendFailure(backendS3, "exists", BackendCommandResult{ExitCode: 1, Stderr: tc.stderr}, tc.execErr)
@@ -160,7 +235,7 @@ func TestBackendErrorClassificationRecognizesNativeProviderCodes(t *testing.T) {
 }
 
 func TestAzureCopyPrefixUsesSynchronousBlobCopiesWithoutMovingSource(t *testing.T) {
-	backend, err := newBackupBackend("azure", "my-container")
+	backend, err := defaultBackupBackends.NewBackupBackend("azure", "my-container")
 	require.NoError(t, err)
 	exec := &recordingBackendExecutor{responses: []BackendCommandResult{{}, {Stdout: "cluster/latest/0/dump.rdb\ncluster/latest/manifest.json"}, {}, {}}}
 	require.NoError(t, backend.Bind(exec).CopyPrefix(context.Background(), "cluster/latest", "cluster/previous"))
@@ -178,7 +253,7 @@ func TestAzureCopyPrefixUsesSynchronousBlobCopiesWithoutMovingSource(t *testing.
 }
 
 func TestS3FailureCannotBeSwallowed(t *testing.T) {
-	backend, err := newBackupBackend("s3", "my-bucket")
+	backend, err := defaultBackupBackends.NewBackupBackend("s3", "my-bucket")
 	require.NoError(t, err)
 	exec := &recordingBackendExecutor{responses: []BackendCommandResult{{ExitCode: 23, Stderr: "AccessDenied"}}}
 	err = backend.Bind(exec).CopyPrefix(context.Background(), "cluster/latest", "cluster/previous")
@@ -192,7 +267,7 @@ func TestS3FailureCannotBeSwallowed(t *testing.T) {
 func TestManifestBytesTravelOnlyOnStdin(t *testing.T) {
 	payload := []byte(`{"value":";$(touch /tmp/pwned)","password":"secret"}`)
 	for _, tc := range []struct{ kind, name string }{{"s3", "my-bucket"}, {"gcs", "my-bucket"}, {"azure", "my-container"}} {
-		backend, err := newBackupBackend(tc.kind, tc.name)
+		backend, err := defaultBackupBackends.NewBackupBackend(tc.kind, tc.name)
 		require.NoError(t, err)
 		exec := &recordingBackendExecutor{}
 		require.NoError(t, backend.Bind(exec).UploadBytes(context.Background(), payload, "cluster/latest/manifest.json"))
@@ -203,7 +278,7 @@ func TestManifestBytesTravelOnlyOnStdin(t *testing.T) {
 }
 
 func TestExistsDistinguishesAbsenceFromProviderFailure(t *testing.T) {
-	backend, err := newBackupBackend("s3", "my-bucket")
+	backend, err := defaultBackupBackends.NewBackupBackend("s3", "my-bucket")
 	require.NoError(t, err)
 	for _, tc := range []struct {
 		name, stdout, stderr string
@@ -230,7 +305,7 @@ func TestExistsDistinguishesAbsenceFromProviderFailure(t *testing.T) {
 }
 
 func TestGCSExistsEscapesPrefixAsRegex(t *testing.T) {
-	backend, err := newBackupBackend("gcs", "my-bucket")
+	backend, err := defaultBackupBackends.NewBackupBackend("gcs", "my-bucket")
 	require.NoError(t, err)
 	exec := &recordingBackendExecutor{responses: []BackendCommandResult{{Stdout: "cluster.v1/latest/object"}}}
 	exists, err := backend.Bind(exec).Exists(context.Background(), "cluster.v1/latest")
@@ -253,7 +328,7 @@ func TestExistsParityAcrossBackends(t *testing.T) {
 		{"backend", "", "provider failed", 1, false, BackendFailure},
 	}
 	for _, backendCase := range backends {
-		backend, err := newBackupBackend(backendCase.kind, backendCase.name)
+		backend, err := defaultBackupBackends.NewBackupBackend(backendCase.kind, backendCase.name)
 		require.NoError(t, err)
 		for _, tc := range cases {
 			t.Run(backendCase.kind+"/"+tc.name, func(t *testing.T) {
@@ -297,7 +372,7 @@ func (e *failEveryOperationExecutor) Execute(_ context.Context, argv []string, i
 func TestEveryTypedOperationPropagatesProviderFailureForEveryBackend(t *testing.T) {
 	for _, tc := range []struct{ kind, name string }{{"s3", "my-bucket"}, {"gcs", "my-bucket"}, {"azure", "my-container"}} {
 		t.Run(tc.kind, func(t *testing.T) {
-			backend, err := newBackupBackend(tc.kind, tc.name)
+			backend, err := defaultBackupBackends.NewBackupBackend(tc.kind, tc.name)
 			require.NoError(t, err)
 			exec := &failEveryOperationExecutor{}
 			store := backend.Bind(exec)

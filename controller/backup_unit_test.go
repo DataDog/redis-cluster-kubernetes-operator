@@ -28,9 +28,9 @@ func TestBackupBucketIsNotSanitizedIntoAnotherResource(t *testing.T) {
 	}
 }
 
-func TestBackupBucketUnsetReturnsEmpty(t *testing.T) {
+func TestBackupLocationUnsetReturnsEmpty(t *testing.T) {
 	t.Setenv("BACKUP_BUCKET", "")
-	assert.Empty(t, (&RedisClusterReconciler{}).backupBucket(clusterWithSpec(cachev1.RedisClusterSpec{})))
+	assert.Empty(t, (&RedisClusterReconciler{}).backupLocation())
 }
 
 func TestBackupBackendSelection(t *testing.T) {
@@ -57,6 +57,38 @@ func TestBackupBackendRejectsMissingAndUnknown(t *testing.T) {
 	t.Setenv("BACKUP_BUCKET", "my-bucket")
 	_, err = r.backupBackend(clusterWithSpec(cachev1.RedisClusterSpec{BackupBackend: "nfs"}))
 	require.Error(t, err)
+}
+
+func TestBackupBackendUsesInjectedFactory(t *testing.T) {
+	t.Setenv("BACKUP_BUCKET", "")
+	var gotProvider, gotLocation string
+	r := &RedisClusterReconciler{BackupBackendFactory: BackupBackendFactoryFunc(func(provider, location string) (BackupProvider, error) {
+		gotProvider, gotLocation = provider, location
+		return stubBackupBackend{}, nil
+	})}
+
+	backend, err := r.backupBackend(clusterWithSpec(cachev1.RedisClusterSpec{BackupBackend: "custom"}))
+	require.NoError(t, err)
+	assert.IsType(t, stubBackupBackend{}, backend)
+	assert.Equal(t, "custom", gotProvider)
+	assert.Empty(t, gotLocation)
+}
+
+func TestBackupBackendRejectsTypedNilFactory(t *testing.T) {
+	t.Setenv("BACKUP_BUCKET", "provider-location")
+	var factory *BackupBackendRegistry
+	r := &RedisClusterReconciler{BackupBackendFactory: factory}
+	_, err := r.backupBackend(clusterWithSpec(cachev1.RedisClusterSpec{BackupBackend: "custom"}))
+	require.ErrorContains(t, err, "factory is nil")
+}
+
+func TestBackupBackendRejectsNilFactoryResult(t *testing.T) {
+	t.Setenv("BACKUP_BUCKET", "provider-location")
+	r := &RedisClusterReconciler{BackupBackendFactory: BackupBackendFactoryFunc(func(string, string) (BackupProvider, error) {
+		return nil, nil
+	})}
+	_, err := r.backupBackend(clusterWithSpec(cachev1.RedisClusterSpec{BackupBackend: "custom"}))
+	require.ErrorContains(t, err, "returned a nil backend")
 }
 
 func TestBackupContainerSelection(t *testing.T) {

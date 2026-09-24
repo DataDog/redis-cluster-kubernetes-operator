@@ -83,7 +83,7 @@ The Secret is mounted only into the toolbox. A fixed helper reads it inside the 
 
 ## Metrics and health
 
-Prometheus metrics are served on port `8080` by default. The optional metrics Service can be annotated through `operator.metrics.service.annotations`. Metric labels are bounded and do not include cluster, namespace, or pod names.
+Prometheus metrics are served on port `8080` by default. The optional metrics Service can be annotated through `operator.metrics.service.annotations`. Metric labels are bounded and do not include cluster, namespace, or pod names. Applications embedding the manager can supply any `metrics.Metrics` implementation and their own cancellation context through `mains.ManageWithOptions`, so Datadog, Prometheus, OpenTelemetry, StatsD, or another backend can use the same controller contract.
 
 Liveness and readiness use a separate listener on port `8081`:
 
@@ -100,11 +100,15 @@ The public process does not register DatadogMetric, WPA, or other external CRD s
 
 Backups are beta and must remain disabled unless all prerequisites are supplied:
 
-- Set `backup.bucketName` and `spec.backupBackend` to `s3`, `gcs`, or `azure`.
+- For a built-in provider, set `backup.bucketName` and `spec.backupBackend`. The reference binary supports `s3`, `gcs`, and `azure`; AWS S3 is the default when the provider is omitted.
 - Add a `backup` sidecar to the Redis StatefulSet template with the corresponding `aws`, `gcloud`, or `az` CLI and cloud identity/credentials.
 - Mount the Redis data volume at the same path in the Redis and backup containers.
 - Grant the workload identity permission to read, write, copy, list, and delete objects in the selected bucket or container.
 - Complete the required security review of toolbox, authentication, backup artifact integrity, and credential handling.
+
+Applications embedding the controller may inject a `controller.BackupBackendFactory` or use `controller.NewBackupBackendRegistry` to add another provider while retaining S3, GCS, and Azure. A custom provider returns a typed `controller.BackupStore`; the controller calls operations such as `UploadFile`, `DownloadFile`, `CopyPrefix`, `DeletePrefix`, and `Exists`, without accepting command templates from the RedisCluster resource. CLI-backed stores may translate those operations internally through the fixed-argv pod executor, which never adds shell wrapping or logs its arguments. Credentials must be supplied through mounted files or stdin, not argv.
+
+Before using a custom provider name on an existing installation, apply the updated RedisCluster CRD. Helm does not replace CRDs from the chart's `crds/` directory during a normal upgrade.
 
 Successful backups rotate exactly two generations: the new complete backup is promoted to `latest`, and the former `latest` becomes `previous`. Restore tries `latest` first and can fall back to `previous`. `spec.backupRetention` is a deprecated compatibility field: it is unsupported and ignored, so it does not change the fixed current-plus-previous retention behavior.
 

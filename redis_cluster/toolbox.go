@@ -250,6 +250,28 @@ func objectStoreCommand(cli ObjectStoreCLI, args []string) ([]string, error) {
 	return append(prefix, args...), nil
 }
 
+// RunBackupCommand transports one fixed argv command with optional opaque
+// stdin. It does not add shell wrapping. Providers are trusted in-process
+// extensions; execution remains limited to the Redis and backup containers.
+func (t *Toolbox) RunBackupCommand(ctx context.Context, node *ClusterNode, containerName string, command []string, input []byte) (int, string, string, error) {
+	if err := t.validate(); err != nil {
+		return 0, "", "", err
+	}
+	if ctx == nil {
+		return 0, "", "", errors.New("exec context is required")
+	}
+	if node == nil || node.PodName == "" {
+		return 0, "", "", errors.New("Redis pod name is required")
+	}
+	if containerName != constants.RedisContainerName && containerName != constants.BackupContainerName {
+		return 0, "", "", errors.New("unsupported object-store container")
+	}
+	if len(command) == 0 {
+		return 0, "", "", errors.New("backup command is required")
+	}
+	return t.kubeExec.ExecWithInput(ctx, node.PodName, containerName, command, input, t.Log)
+}
+
 // RunObjectStoreCommand transports fixed-argv object-store commands with
 // optional opaque stdin. It permits only the public backup CLIs and fixed
 // Redis/backup containers.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"sync/atomic"
 
 	"github.com/DataDog/redis-cluster-kubernetes-operator/constants"
@@ -24,43 +25,76 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
+// ManageOptions configures the controller manager and its integration providers.
+type ManageOptions struct {
+	// Context controls manager shutdown. Nil uses context.Background; embedding
+	// applications should normally provide their own cancellation context.
+	Context              context.Context
+	MetricsAddr          string
+	HealthProbeAddr      string
+	EnableLeaderElection bool
+	Metrics              metrics.Metrics
+	BackupBackendFactory controller.BackupBackendFactory
+}
+
 func Manage(scheme *runtime.Scheme, metricsAddr, healthProbeAddr string, enableLeaderElection bool, log logr.Logger) {
-	log.Info("Manager starting", "leader_election", enableLeaderElection)
+	err := ManageWithOptions(scheme, log, ManageOptions{
+		Context:              ctrl.SetupSignalHandler(),
+		MetricsAddr:          metricsAddr,
+		HealthProbeAddr:      healthProbeAddr,
+		EnableLeaderElection: enableLeaderElection,
+	})
+	if err != nil {
+		log.Error(err, "Manager exited with an error")
+		os.Exit(1)
+	}
+}
+
+// ManageWithOptions runs the controller with optional integration providers.
+// Nil integrations preserve the reference binary defaults: Prometheus metrics
+// (or no-op when its endpoint is disabled) and AWS S3 backup storage.
+func ManageWithOptions(scheme *runtime.Scheme, log logr.Logger, options ManageOptions) error {
+	log.Info("Manager starting", "leader_election", options.EnableLeaderElection)
+	ctx := options.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	credentialProvider, err := credentialProviderFromMode(os.Getenv("REDIS_AUTH_MODE"))
 	if err != nil {
-		log.Error(err, "Invalid Redis authentication configuration")
-		os.Exit(1)
+		return fmt.Errorf("invalid Redis authentication configuration: %w", err)
 	}
 
 	watchNamespace, found := os.LookupEnv("WATCH_NAMESPACE")
 	if !found {
-		log.Error(errors.New("missing environment variable WATCH_NAMESPACE"), "Failed to determine namespace to watch")
-		os.Exit(1)
+		return errors.New("missing environment variable WATCH_NAMESPACE")
 	}
 
 	log.Info("Watching namespace", "namespace", watchNamespace)
-	operatorMetrics := metrics.CreateNoop()
-	if metricsAddr != "0" {
-		operatorMetrics, err = metrics.CreatePrometheus(ctrlmetrics.Registry)
-		if err != nil {
-			log.Error(err, "Failed to register Prometheus metrics")
-			os.Exit(1)
-		}
-		_ = operatorMetrics.Count(counters.AppStarted)
+	operatorMetrics, err := resolveMetrics(options.MetricsAddr, options.Metrics)
+	if err != nil {
+		return err
+	}
+	_ = operatorMetrics.Count(counters.AppStarted)
+	backupBackendFactory, err := resolveBackupBackendFactory(options.BackupBackendFactory)
+	if err != nil {
+		return err
 	}
 
-	cfg := ctrl.GetConfigOrDie()
+	cfg, err := ctrl.GetConfig()
+	if err != nil {
+		return fmt.Errorf("get Kubernetes configuration: %w", err)
+	}
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
 		Metrics: server.Options{
-			BindAddress: metricsAddr,
+			BindAddress: options.MetricsAddr,
 		},
-		HealthProbeBindAddress: healthProbeAddr,
+		HealthProbeBindAddress: options.HealthProbeAddr,
 		WebhookServer: webhook.NewServer(webhook.Options{
 			Port: constants.ManagerPort,
 		}),
-		LeaderElection:   enableLeaderElection,
+		LeaderElection:   options.EnableLeaderElection,
 		LeaderElectionID: constants.LeaderElectionID,
 		Cache: cache.Options{
 			DefaultNamespaces: map[string]cache.Config{
@@ -73,12 +107,10 @@ func Manage(scheme *runtime.Scheme, metricsAddr, healthProbeAddr string, enableL
 	})
 
 	if err != nil {
-		log.Error(err, "Failed to start the manager")
-		os.Exit(1)
+		return fmt.Errorf("create controller manager: %w", err)
 	}
 	if err := configureHealthChecks(mgr); err != nil {
-		log.Error(err, "Failed to register health checks")
-		os.Exit(1)
+		return err
 	}
 
 	cc := redis_cluster.ClusterClient{
@@ -92,17 +124,53 @@ func Manage(scheme *runtime.Scheme, metricsAddr, healthProbeAddr string, enableL
 	}
 
 	if err = (&controller.RedisClustersReconciler{
-		ClusterClient: cc,
+		ClusterClient:        cc,
+		BackupBackendFactory: backupBackendFactory,
 	}).SetupWithManager(mgr); err != nil {
-		log.Error(err, "Failed to create the controller")
-		os.Exit(1)
+		return fmt.Errorf("create Redis cluster controller: %w", err)
 	}
 	log.Info("Start the manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		log.Error(err, "Failed to start the manager")
-		os.Exit(1)
+	if err := mgr.Start(ctx); err != nil {
+		return fmt.Errorf("run controller manager: %w", err)
 	}
 	log.Info("Manager has exited")
+	return nil
+}
+
+func resolveMetrics(metricsAddr string, reporter metrics.Metrics) (metrics.Metrics, error) {
+	if reporter != nil {
+		if isNilInterface(reporter) {
+			return nil, errors.New("metrics reporter is nil")
+		}
+		return reporter, nil
+	}
+	if metricsAddr == "0" {
+		return metrics.CreateNoop(), nil
+	}
+	return metrics.CreatePrometheus(ctrlmetrics.Registry)
+}
+
+func resolveBackupBackendFactory(factory controller.BackupBackendFactory) (controller.BackupBackendFactory, error) {
+	if factory == nil {
+		return controller.NewBackupBackendRegistry(), nil
+	}
+	if isNilInterface(factory) {
+		return nil, errors.New("backup backend factory is nil")
+	}
+	return factory, nil
+}
+
+func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 type healthCheckManager interface {

@@ -113,24 +113,24 @@ func NewKubeExec(config *rest.Config, namespace string, log logr.Logger) (*Exec,
 
 // ExecNC executes a command on a specific pod and wait for the command's output.
 func (c *Exec) ExecNC(ctx context.Context, podName string, command []string, log logr.Logger) (int, string, string, error) {
-	return c.exec(ctx, podName, "", command, nil, log)
+	return c.exec(ctx, podName, "", command, nil, log, true)
 }
 
 // Exec executes a command on a specific pod and container and wait for the command's output.
 func (c *Exec) Exec(ctx context.Context, podName string, containerName string, command []string, log logr.Logger) (int, string, string, error) {
-	return c.exec(ctx, podName, containerName, command, nil, log)
+	return c.exec(ctx, podName, containerName, command, nil, log, true)
 }
 
 // ExecWithInput executes a fixed argv command and transports payload only over
-// stdin. The payload is never included in command logging or the exec request URL.
+// stdin. Arguments are summarized rather than logged, and the payload is never
+// included in command logging or the exec request URL.
 func (c *Exec) ExecWithInput(ctx context.Context, podName, containerName string, command []string, input []byte, log logr.Logger) (int, string, string, error) {
-	return c.exec(ctx, podName, containerName, command, input, log)
+	return c.exec(ctx, podName, containerName, command, input, log, false)
 }
 
 // Executes a command on a specific pod and optional container and wait for the command's output.
-func (c *Exec) exec(ctx context.Context, podName string, containerName string, command []string, input []byte, log logr.Logger) (int, string, string, error) {
-	xlog := utils.XLog(log)
-	xlog.Debug("Execute command", "podName", podName, "containerName", containerName, "command", redactCommand(command))
+func (c *Exec) exec(ctx context.Context, podName string, containerName string, command []string, input []byte, log logr.Logger, logArguments bool) (int, string, string, error) {
+	logExecCommand(log, podName, containerName, command, logArguments)
 
 	req := c.clientSet.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -184,6 +184,21 @@ func (c *Exec) exec(ctx context.Context, podName string, containerName string, c
 
 	// xlog.Debug("Executed command", "stdout", strout, "stderr", strerr, "rc", rc)
 	return rc, strout, strerr, nil
+}
+
+func logExecCommand(log logr.Logger, podName, containerName string, command []string, logArguments bool) {
+	xlog := utils.XLog(log)
+	if logArguments {
+		xlog.Debug("Execute command", "podName", podName, "containerName", containerName, "command", redactCommand(command))
+		return
+	}
+	executable := ""
+	argumentCount := 0
+	if len(command) > 0 {
+		executable = command[0]
+		argumentCount = len(command) - 1
+	}
+	xlog.Debug("Execute command", "podName", podName, "containerName", containerName, "executable", executable, "argumentCount", argumentCount)
 }
 
 func podExecOptions(command []string) *v1.PodExecOptions {

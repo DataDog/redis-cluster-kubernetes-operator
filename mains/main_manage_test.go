@@ -6,10 +6,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DataDog/redis-cluster-kubernetes-operator/controller"
+	operatormetrics "github.com/DataDog/redis-cluster-kubernetes-operator/metrics"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
+
+type providerMetrics struct{ operatormetrics.NoopMetrics }
+
+func TestResolveMetricsUsesInjectedReporterWhenEndpointIsDisabled(t *testing.T) {
+	want := &providerMetrics{}
+	got, err := resolveMetrics("0", want)
+	require.NoError(t, err)
+	require.Same(t, want, got)
+}
+
+func TestResolveMetricsDefaultsToNoopWhenEndpointIsDisabled(t *testing.T) {
+	got, err := resolveMetrics("0", nil)
+	require.NoError(t, err)
+	require.IsType(t, &operatormetrics.NoopMetrics{}, got)
+}
+
+func TestResolveMetricsRejectsTypedNilReporter(t *testing.T) {
+	var typedNil *providerMetrics
+	_, err := resolveMetrics("0", typedNil)
+	require.ErrorContains(t, err, "reporter is nil")
+}
+
+func TestResolveBackupBackendFactoryRejectsTypedNil(t *testing.T) {
+	var factory *controller.BackupBackendRegistry
+	_, err := resolveBackupBackendFactory(factory)
+	require.ErrorContains(t, err, "factory is nil")
+}
 
 type recordingHealthManager struct {
 	healthChecks map[string]healthz.Checker
