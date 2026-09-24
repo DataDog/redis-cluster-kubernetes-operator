@@ -35,6 +35,14 @@ type ManageOptions struct {
 	EnableLeaderElection bool
 	Metrics              metrics.Metrics
 	BackupBackendFactory controller.BackupBackendFactory
+	// AutoscalingProvider supplies primary-count recommendations. Nil leaves
+	// autoscaling unavailable while preserving status reporting.
+	AutoscalingProvider controller.AutoscalingProvider
+	// LifecycleAdapter integrates an optional infrastructure lifecycle protocol.
+	// Nil retains the controller's provider-neutral Kubernetes termination path.
+	LifecycleAdapter controller.LifecycleAdapter
+	// PrimaryEndpointResolver defaults to Kubernetes Service DNS when omitted.
+	PrimaryEndpointResolver controller.PrimaryEndpointResolver
 }
 
 func Manage(scheme *runtime.Scheme, metricsAddr, healthProbeAddr string, enableLeaderElection bool, log logr.Logger) {
@@ -127,10 +135,7 @@ func ManageWithOptions(scheme *runtime.Scheme, log logr.Logger, options ManageOp
 		CredentialProvider: credentialProvider,
 	}
 
-	if err = (&controller.RedisClustersReconciler{
-		ClusterClient:        cc,
-		BackupBackendFactory: backupBackendFactory,
-	}).SetupWithManager(mgr); err != nil {
+	if err = newRedisClustersReconciler(cc, options, backupBackendFactory).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("create Redis cluster controller: %w", err)
 	}
 	log.Info("Start the manager")
@@ -139,6 +144,33 @@ func ManageWithOptions(scheme *runtime.Scheme, log logr.Logger, options ManageOp
 	}
 	log.Info("Manager has exited")
 	return nil
+}
+
+func newRedisClustersReconciler(
+	cc redis_cluster.ClusterClient,
+	options ManageOptions,
+	backupBackendFactory controller.BackupBackendFactory,
+) *controller.RedisClustersReconciler {
+	autoscalingProvider := options.AutoscalingProvider
+	if isNilInterface(autoscalingProvider) {
+		autoscalingProvider = nil
+	}
+	lifecycleAdapter := options.LifecycleAdapter
+	if isNilInterface(lifecycleAdapter) {
+		lifecycleAdapter = nil
+	}
+	primaryEndpointResolver := options.PrimaryEndpointResolver
+	if isNilInterface(primaryEndpointResolver) {
+		primaryEndpointResolver = nil
+	}
+
+	return &controller.RedisClustersReconciler{
+		ClusterClient:           cc,
+		AutoscalingProvider:     autoscalingProvider,
+		LifecycleAdapter:        lifecycleAdapter,
+		PrimaryEndpointResolver: primaryEndpointResolver,
+		BackupBackendFactory:    backupBackendFactory,
+	}
 }
 
 func resolveMetrics(metricsAddr string, reporter metrics.Metrics) (metrics.Metrics, func(), error) {

@@ -6,16 +6,75 @@ import (
 	"testing"
 	"time"
 
+	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/controller"
 	operatormetrics "github.com/DataDog/redis-cluster-kubernetes-operator/metrics"
+	"github.com/DataDog/redis-cluster-kubernetes-operator/redis_cluster"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 type providerMetrics struct{ operatormetrics.NoopMetrics }
+
+type testAutoscalingProvider struct{}
+
+func (*testAutoscalingProvider) Recommendations(context.Context, *cachev1.RedisCluster) (controller.AutoscalingRecommendations, error) {
+	return controller.AutoscalingRecommendations{}, nil
+}
+
+type testLifecycleAdapter struct{}
+
+func (*testLifecycleAdapter) PodState(*corev1.Pod) (controller.LifecyclePodState, error) {
+	return controller.LifecyclePodState{}, nil
+}
+
+func (*testLifecycleAdapter) Reconcile(context.Context, *controller.RedisClusterReconciler, *redis_cluster.Cluster) (bool, error) {
+	return true, nil
+}
+
+type testPrimaryEndpointResolver struct{}
+
+func (*testPrimaryEndpointResolver) ResolveHostname(*redis_cluster.Cluster, *redis_cluster.ClusterNode, *corev1.Pod) (string, bool) {
+	return "redis.internal.example", true
+}
+
+func TestNewRedisClustersReconcilerWiresIntegrationProviders(t *testing.T) {
+	autoscalingProvider := &testAutoscalingProvider{}
+	lifecycleAdapter := &testLifecycleAdapter{}
+	primaryEndpointResolver := &testPrimaryEndpointResolver{}
+	backupBackendFactory := controller.NewBackupBackendRegistry()
+
+	reconciler := newRedisClustersReconciler(redis_cluster.ClusterClient{}, ManageOptions{
+		AutoscalingProvider:     autoscalingProvider,
+		LifecycleAdapter:        lifecycleAdapter,
+		PrimaryEndpointResolver: primaryEndpointResolver,
+	}, backupBackendFactory)
+
+	require.Same(t, autoscalingProvider, reconciler.AutoscalingProvider)
+	require.Same(t, lifecycleAdapter, reconciler.LifecycleAdapter)
+	require.Same(t, primaryEndpointResolver, reconciler.PrimaryEndpointResolver)
+	require.Same(t, backupBackendFactory, reconciler.BackupBackendFactory)
+}
+
+func TestNewRedisClustersReconcilerTreatsTypedNilIntegrationsAsOmitted(t *testing.T) {
+	var autoscalingProvider *testAutoscalingProvider
+	var lifecycleAdapter *testLifecycleAdapter
+	var primaryEndpointResolver *testPrimaryEndpointResolver
+
+	reconciler := newRedisClustersReconciler(redis_cluster.ClusterClient{}, ManageOptions{
+		AutoscalingProvider:     autoscalingProvider,
+		LifecycleAdapter:        lifecycleAdapter,
+		PrimaryEndpointResolver: primaryEndpointResolver,
+	}, controller.NewBackupBackendRegistry())
+
+	require.Nil(t, reconciler.AutoscalingProvider)
+	require.Nil(t, reconciler.LifecycleAdapter)
+	require.Nil(t, reconciler.PrimaryEndpointResolver)
+}
 
 func TestResolveMetricsUsesInjectedReporterWhenEndpointIsDisabled(t *testing.T) {
 	want := &providerMetrics{}

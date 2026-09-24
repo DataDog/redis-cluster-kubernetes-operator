@@ -15,9 +15,10 @@ import (
 
 // ExampleManageWithOptions_explicitDefaults shows how an embedding binary can
 // select the same Prometheus and cloud-storage integrations used by the
-// reference binary. Leaving Metrics and BackupBackendFactory nil has the same
-// effect; explicit construction is useful when the application wants to add
-// providers to the registry before starting the manager.
+// reference binary. Leaving Metrics, BackupBackendFactory, and
+// PrimaryEndpointResolver nil has the same effect; explicit construction is
+// useful when the application wants to add providers to the registry before
+// starting the manager.
 func ExampleManageWithOptions_explicitDefaults() {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -30,11 +31,12 @@ func ExampleManageWithOptions_explicitDefaults() {
 	defer cleanup()
 
 	options := mains.ManageOptions{
-		Context:              ctrl.SetupSignalHandler(),
-		MetricsAddr:          ":8080",
-		HealthProbeAddr:      ":8081",
-		Metrics:              reporter,
-		BackupBackendFactory: controller.NewBackupBackendRegistry(),
+		Context:                 ctrl.SetupSignalHandler(),
+		MetricsAddr:             ":8080",
+		HealthProbeAddr:         ":8081",
+		Metrics:                 reporter,
+		BackupBackendFactory:    controller.NewBackupBackendRegistry(),
+		PrimaryEndpointResolver: controller.KubernetesServiceDNSResolver{},
 	}
 	if err := mains.ManageWithOptions(scheme, logr.Discard(), options); err != nil {
 		panic(err)

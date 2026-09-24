@@ -90,6 +90,9 @@ does not override either integration:
 | --- | --- |
 | `Metrics` | Prometheus on `MetricsAddr`, or no-op when `MetricsAddr` is `"0"` |
 | `BackupBackendFactory` | The built-in S3, GCS, and Azure registry; an omitted `spec.backupBackend` selects AWS S3 |
+| `AutoscalingProvider` | None; configured autoscaling reports `ProviderUnavailable` |
+| `LifecycleAdapter` | None; the controller retains its provider-neutral Kubernetes termination safety |
+| `PrimaryEndpointResolver` | Kubernetes Service DNS |
 
 An embedding application can also wire those defaults explicitly:
 
@@ -101,11 +104,12 @@ if err != nil {
 defer cleanup()
 
 err = mains.ManageWithOptions(scheme, log, mains.ManageOptions{
-	Context:              ctx,
-	MetricsAddr:          ":8080",
-	HealthProbeAddr:      ":8081",
-	Metrics:              reporter,
-	BackupBackendFactory: controller.NewBackupBackendRegistry(),
+	Context:                 ctx,
+	MetricsAddr:             ":8080",
+	HealthProbeAddr:         ":8081",
+	Metrics:                 reporter,
+	BackupBackendFactory:    controller.NewBackupBackendRegistry(),
+	PrimaryEndpointResolver: controller.KubernetesServiceDNSResolver{},
 })
 ```
 
@@ -115,6 +119,11 @@ registry as `BackupBackendFactory`. The constructor has the signature
 `func(location string) (controller.BackupProvider, error)`. To replace
 metrics, pass any implementation of `metrics.Metrics`. The compile-checked
 example in `mains/example_test.go` shows the complete explicit-default setup.
+
+Embedding applications can also supply `AutoscalingProvider`,
+`LifecycleAdapter`, and `PrimaryEndpointResolver` through `ManageOptions`.
+These are process startup integrations: RedisCluster resources cannot provide
+implementation code or command templates.
 
 ## Metrics and health
 
@@ -129,7 +138,7 @@ Metrics can be disabled independently without disabling health probes.
 
 ## Autoscaling and lifecycle providers
 
-The public process does not register DatadogMetric, WPA, or other external CRD schemes. If autoscaling is configured without an injected recommendation provider, reconciliation continues and reports `ProviderUnavailable` in status. Kubernetes termination and drain safety remain active; provider-specific lifecycle acknowledgement is opt-in and is not wired by the public startup.
+The reference binary does not register DatadogMetric, WPA, or other external CRD schemes. An embedding application can register provider CRDs in the scheme passed to `ManageWithOptions` and supply an autoscaling recommendation provider through its options. If autoscaling is configured without one, reconciliation continues and reports `ProviderUnavailable` in status. Kubernetes termination and drain safety remain active; provider-specific lifecycle acknowledgement is opt-in and can be supplied through the same startup options.
 
 ## Backups and restore
 
