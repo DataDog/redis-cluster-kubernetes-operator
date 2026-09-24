@@ -47,6 +47,11 @@ expect_rejected_without_disclosure \
   "json-secret-$HEX36" \
   "{\"password\":\"json-secret-$HEX36\"}"
 
+expect_rejected_without_disclosure \
+  "mixed-redacted-and-unredacted-credential-fields" \
+  "real-secret" \
+  "user=x password=[REDACTED] password=real-secret"
+
 for prefix in cleanroom- p- wrong- missing-; do
   expect_rejected_without_disclosure \
     "canary-${prefix%-}" \

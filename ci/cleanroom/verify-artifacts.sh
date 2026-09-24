@@ -37,7 +37,7 @@ contains_unredacted_credential() {
       {
         line = tolower($0)
         while (match(line, redacted)) {
-          line = substr(line, 1, RSTART - 1) substr(line, RSTART + RLENGTH)
+          line = substr(line, 1, RSTART - 1) " " substr(line, RSTART + RLENGTH)
         }
         if (line ~ credential) {
           unsafe = 1
