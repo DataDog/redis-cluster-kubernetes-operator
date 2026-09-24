@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -268,6 +270,117 @@ func TestAzureDownloadBytesWritesBlobToStdoutWithoutMetadata(t *testing.T) {
 		"--name", "cluster/latest/manifest.json", "--file", "/dev/stdout", "--output", "none",
 		"--only-show-errors",
 	}, exec.calls[1].argv)
+}
+
+type blockingAzureExecutor struct {
+	mu          sync.Mutex
+	calls       int
+	blockOnCall int
+	blocked     chan struct{}
+	release     chan struct{}
+	firstCall   chan struct{}
+	firstOnce   sync.Once
+	responses   []BackendCommandResult
+}
+
+func (e *blockingAzureExecutor) Execute(_ context.Context, _ []string, _ []byte) (BackendCommandResult, error) {
+	e.firstOnce.Do(func() {
+		if e.firstCall != nil {
+			close(e.firstCall)
+		}
+	})
+
+	e.mu.Lock()
+	e.calls++
+	call := e.calls
+	var response BackendCommandResult
+	if call <= len(e.responses) {
+		response = e.responses[call-1]
+	}
+	e.mu.Unlock()
+
+	if call == e.blockOnCall {
+		close(e.blocked)
+		<-e.release
+	}
+	return response, nil
+}
+
+func TestAzureBackendSerializesAuthenticatedCommandSequences(t *testing.T) {
+	tests := []struct {
+		name      string
+		responses []BackendCommandResult
+		operation func(BackupStore) error
+	}{
+		{
+			name:      "copy prefix",
+			responses: []BackendCommandResult{{}, {Stdout: "cluster/latest/object"}, {}},
+			operation: func(store BackupStore) error {
+				return store.CopyPrefix(context.Background(), "cluster/latest", "cluster/previous")
+			},
+		},
+		{
+			name:      "delete prefix",
+			responses: []BackendCommandResult{{}, {Stdout: "cluster/previous/object"}, {}},
+			operation: func(store BackupStore) error {
+				return store.DeletePrefix(context.Background(), "cluster/previous")
+			},
+		},
+		{
+			name:      "exists",
+			responses: []BackendCommandResult{{}, {Stdout: "cluster/latest/object"}},
+			operation: func(store BackupStore) error {
+				_, err := store.Exists(context.Background(), "cluster/latest")
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, err := NewAzureBackupBackend("my-container")
+			require.NoError(t, err)
+
+			blocked := make(chan struct{})
+			release := make(chan struct{})
+			firstExec := &blockingAzureExecutor{
+				blockOnCall: 2,
+				blocked:     blocked,
+				release:     release,
+				responses:   tc.responses,
+			}
+			secondCalled := make(chan struct{})
+			secondExec := &blockingAzureExecutor{
+				firstCall: secondCalled,
+				responses: []BackendCommandResult{{}, {Stdout: "cluster/latest/object"}},
+			}
+
+			firstResult := make(chan error, 1)
+			go func() { firstResult <- tc.operation(backend.Bind(firstExec)) }()
+			<-blocked
+
+			secondStarted := make(chan struct{})
+			secondResult := make(chan error, 1)
+			go func() {
+				close(secondStarted)
+				_, err := backend.Bind(secondExec).Exists(context.Background(), "cluster/latest")
+				secondResult <- err
+			}()
+			<-secondStarted
+
+			overlapped := false
+			select {
+			case <-secondCalled:
+				overlapped = true
+			case <-time.After(100 * time.Millisecond):
+			}
+
+			close(release)
+			require.NoError(t, <-firstResult)
+			require.NoError(t, <-secondResult)
+			assert.False(t, overlapped, "a second Azure command started while an authenticated sequence was still running")
+		})
+	}
 }
 
 func TestS3FailureCannotBeSwallowed(t *testing.T) {

@@ -502,7 +502,11 @@ func (s *gcsStore) Exists(ctx context.Context, p string) (bool, error) {
 	return strings.TrimSpace(result.Stdout) != "", nil
 }
 
-type azureBackend struct{ container string }
+type azureBackend struct {
+	container string
+	// All bound stores share one Azure CLI config directory.
+	authMu sync.Mutex
+}
 type azureStore struct {
 	backend  *azureBackend
 	executor BackendCommandExecutor
@@ -525,6 +529,9 @@ func (s *azureStore) run(ctx context.Context, operation string, args []string, i
 	return runCommand(ctx, backendAzure, s.executor, operation, append([]string{"env", "AZURE_CONFIG_DIR=/tmp/.azure", "az"}, args...), input)
 }
 func (s *azureStore) runAuthenticated(ctx context.Context, operation string, args []string, input []byte) (BackendCommandResult, error) {
+	s.backend.authMu.Lock()
+	defer s.backend.authMu.Unlock()
+
 	if err := s.login(ctx); err != nil {
 		return BackendCommandResult{}, err
 	}
@@ -568,6 +575,9 @@ func (s *azureStore) DeletePrefix(ctx context.Context, p string) error {
 	if err := validateRemotePath(p); err != nil {
 		return err
 	}
+	s.backend.authMu.Lock()
+	defer s.backend.authMu.Unlock()
+
 	if err := s.login(ctx); err != nil {
 		return err
 	}
@@ -596,6 +606,9 @@ func (s *azureStore) CopyPrefix(ctx context.Context, src, dst string) error {
 	if err := validateRemotePath(dst); err != nil {
 		return err
 	}
+	s.backend.authMu.Lock()
+	defer s.backend.authMu.Unlock()
+
 	if err := s.login(ctx); err != nil {
 		return err
 	}
