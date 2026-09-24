@@ -21,6 +21,25 @@ func TestPrometheusRegistersWithIndependentRegistries(t *testing.T) {
 	}
 }
 
+func TestPrometheusCleanupAllowsRegistrationWithSameRegistry(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	for range 2 {
+		m, cleanup, err := CreatePrometheusWithCleanup(registry)
+		require.NoError(t, err)
+		require.NotNil(t, m)
+
+		families, err := registry.Gather()
+		require.NoError(t, err)
+		require.Contains(t, metricFamiliesByName(families), "redis_cluster_operator_health")
+
+		cleanup()
+		cleanup()
+		families, err = registry.Gather()
+		require.NoError(t, err)
+		require.NotContains(t, metricFamiliesByName(families), "redis_cluster_operator_health")
+	}
+}
+
 func TestPrometheusDetailsAreMetricSpecific(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	m, err := CreatePrometheus(registry)

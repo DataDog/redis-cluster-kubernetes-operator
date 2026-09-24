@@ -8,7 +8,7 @@ readonly ARTIFACT_DIR="${1:-cleanroom-artifacts}"
 quiet_match() {
   local status=0
 
-  rg --quiet --hidden "$@" -- "$ARTIFACT_DIR" >/dev/null 2>&1 || status=$?
+  grep -E -r -a -q "$@" -- "$ARTIFACT_DIR" >/dev/null 2>&1 || status=$?
   case "$status" in
     0) return 0 ;;
     1) return 1 ;;
@@ -24,12 +24,11 @@ contains_unredacted_credential() {
   local credential_field
   credential_field="(^|[^[:alnum:]_])[\"']?(password|rediscli_auth)[\"']?[[:space:]]*[=:][[:space:]]*"
 
-  # Use POSIX regular expressions because GitHub-hosted runner builds of
-  # ripgrep may omit PCRE2 support.
-  # awk consumes the complete stream, so a detected match cannot leave ripgrep
+  # Use tools and POSIX regular expressions available on standard CI runners.
+  # awk consumes the complete stream, so a detected match cannot leave grep
   # with a misleading broken-pipe status.
   set +e
-  rg --hidden --no-filename --text -i "$credential_field" -- "$ARTIFACT_DIR" 2>/dev/null |
+  grep -E -r -a -h -i "$credential_field" -- "$ARTIFACT_DIR" 2>/dev/null |
     awk -v field="$credential_field" '
       BEGIN {
         redacted = field "[\"\047]?[[]redacted[]][\"\047]?([,}]|[[:space:]]|$)"

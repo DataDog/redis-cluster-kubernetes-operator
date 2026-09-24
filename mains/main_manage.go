@@ -70,10 +70,14 @@ func ManageWithOptions(scheme *runtime.Scheme, log logr.Logger, options ManageOp
 	}
 
 	log.Info("Watching namespace", "namespace", watchNamespace)
-	operatorMetrics, err := resolveMetrics(options.MetricsAddr, options.Metrics)
+	operatorMetrics, cleanupMetrics, err := resolveMetrics(options.MetricsAddr, options.Metrics)
 	if err != nil {
 		return err
 	}
+	if cleanupMetrics != nil {
+		defer cleanupMetrics()
+	}
+	operatorMetrics = metrics.WithErrorLogging(operatorMetrics, log.WithName("metrics"))
 	_ = operatorMetrics.Count(counters.AppStarted)
 	backupBackendFactory, err := resolveBackupBackendFactory(options.BackupBackendFactory)
 	if err != nil {
@@ -137,17 +141,17 @@ func ManageWithOptions(scheme *runtime.Scheme, log logr.Logger, options ManageOp
 	return nil
 }
 
-func resolveMetrics(metricsAddr string, reporter metrics.Metrics) (metrics.Metrics, error) {
+func resolveMetrics(metricsAddr string, reporter metrics.Metrics) (metrics.Metrics, func(), error) {
 	if reporter != nil {
 		if isNilInterface(reporter) {
-			return nil, errors.New("metrics reporter is nil")
+			return nil, nil, errors.New("metrics reporter is nil")
 		}
-		return reporter, nil
+		return reporter, nil, nil
 	}
 	if metricsAddr == "0" {
-		return metrics.CreateNoop(), nil
+		return metrics.CreateNoop(), nil, nil
 	}
-	return metrics.CreatePrometheus(ctrlmetrics.Registry)
+	return metrics.CreatePrometheusWithCleanup(ctrlmetrics.Registry)
 }
 
 func resolveBackupBackendFactory(factory controller.BackupBackendFactory) (controller.BackupBackendFactory, error) {

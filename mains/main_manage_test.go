@@ -8,7 +8,9 @@ import (
 
 	"github.com/DataDog/redis-cluster-kubernetes-operator/controller"
 	operatormetrics "github.com/DataDog/redis-cluster-kubernetes-operator/metrics"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
@@ -17,21 +19,48 @@ type providerMetrics struct{ operatormetrics.NoopMetrics }
 
 func TestResolveMetricsUsesInjectedReporterWhenEndpointIsDisabled(t *testing.T) {
 	want := &providerMetrics{}
-	got, err := resolveMetrics("0", want)
+	got, cleanup, err := resolveMetrics("0", want)
 	require.NoError(t, err)
 	require.Same(t, want, got)
+	require.Nil(t, cleanup)
 }
 
 func TestResolveMetricsDefaultsToNoopWhenEndpointIsDisabled(t *testing.T) {
-	got, err := resolveMetrics("0", nil)
+	got, cleanup, err := resolveMetrics("0", nil)
 	require.NoError(t, err)
 	require.IsType(t, &operatormetrics.NoopMetrics{}, got)
+	require.Nil(t, cleanup)
 }
 
 func TestResolveMetricsRejectsTypedNilReporter(t *testing.T) {
 	var typedNil *providerMetrics
-	_, err := resolveMetrics("0", typedNil)
+	_, _, err := resolveMetrics("0", typedNil)
 	require.ErrorContains(t, err, "reporter is nil")
+}
+
+func TestResolveMetricsCleansUpDefaultPrometheusReporter(t *testing.T) {
+	for range 2 {
+		got, cleanup, err := resolveMetrics(":8080", nil)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.NotNil(t, cleanup)
+		cleanup()
+	}
+}
+
+func TestManageWithOptionsCleansUpDefaultPrometheusOnStartupError(t *testing.T) {
+	t.Setenv("REDIS_AUTH_MODE", "none")
+	t.Setenv("WATCH_NAMESPACE", "default")
+	var factory *controller.BackupBackendRegistry
+	options := ManageOptions{
+		MetricsAddr:          ":8080",
+		BackupBackendFactory: factory,
+	}
+
+	for range 2 {
+		err := ManageWithOptions(runtime.NewScheme(), logr.Discard(), options)
+		require.ErrorContains(t, err, "backup backend factory is nil")
+	}
 }
 
 func TestResolveBackupBackendFactoryRejectsTypedNil(t *testing.T) {

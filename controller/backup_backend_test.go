@@ -252,6 +252,24 @@ func TestAzureCopyPrefixUsesSynchronousBlobCopiesWithoutMovingSource(t *testing.
 	assert.Contains(t, exec.calls[3].argv, "cluster/previous/manifest.json")
 }
 
+func TestAzureDownloadBytesWritesBlobToStdoutWithoutMetadata(t *testing.T) {
+	backend, err := defaultBackupBackends.NewBackupBackend("azure", "my-container")
+	require.NoError(t, err)
+	payload := []byte(`{"redisCluster":"example"}`)
+	exec := &recordingBackendExecutor{responses: []BackendCommandResult{{}, {Stdout: string(payload)}}}
+
+	got, err := backend.Bind(exec).DownloadBytes(context.Background(), "cluster/latest/manifest.json")
+	require.NoError(t, err)
+	assert.Equal(t, payload, got)
+	require.Len(t, exec.calls, 2)
+	assert.Equal(t, []string{
+		"env", "AZURE_CONFIG_DIR=/tmp/.azure", "az", "storage", "blob", "download",
+		"--auth-mode", "login", "--overwrite", "true", "--container-name", "my-container",
+		"--name", "cluster/latest/manifest.json", "--file", "/dev/stdout", "--output", "none",
+		"--only-show-errors",
+	}, exec.calls[1].argv)
+}
+
 func TestS3FailureCannotBeSwallowed(t *testing.T) {
 	backend, err := defaultBackupBackends.NewBackupBackend("s3", "my-bucket")
 	require.NoError(t, err)
