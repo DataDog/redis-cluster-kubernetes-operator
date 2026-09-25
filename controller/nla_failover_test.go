@@ -595,6 +595,77 @@ func TestFindNonDrainingReplica_SkipsReplicaWithMissingPod(t *testing.T) {
 	assert.Equal(t, "r2", got.ID, "must skip the replica whose pod is missing from podList")
 }
 
+// Redis can complete its own failover before the controller observes a
+// terminating primary. When that election promotes a drain candidate, the
+// controller must select a healthy sibling for a corrective failover.
+func TestFindDrainCandidatePrimaryFailover_AutoPromotedCandidate(t *testing.T) {
+	drainingPrimary := newClusterNode("10.0.0.1", "candidate", redis_cluster.PrimaryNode)
+	drainingPrimary.HasDrainCandidateCond = true
+	healthyReplica := newClusterNode("10.0.0.2", "sibling", redis_cluster.ReplicaNode)
+	healthyReplica.PrimaryID = drainingPrimary.ID
+	cluster := newClusterWithNodes([]*redis_cluster.ClusterNode{drainingPrimary, healthyReplica})
+	podList := &v1.PodList{Items: []v1.Pod{
+		podWithIPAndDrain(drainingPrimary.IP),
+		podWithIP(healthyReplica.IP),
+	}}
+
+	primary, replica := findDrainCandidatePrimaryFailover(cluster, podList)
+	require.Same(t, drainingPrimary, primary)
+	require.Same(t, healthyReplica, replica)
+}
+
+func TestFindDrainCandidatePrimaryFailover_AllReplicasDraining(t *testing.T) {
+	drainingPrimary := newClusterNode("10.0.0.1", "candidate", redis_cluster.PrimaryNode)
+	drainingPrimary.HasDrainCandidateCond = true
+	drainingReplica := newClusterNode("10.0.0.2", "sibling", redis_cluster.ReplicaNode)
+	drainingReplica.PrimaryID = drainingPrimary.ID
+	drainingReplica.HasDrainCandidateCond = true
+	cluster := newClusterWithNodes([]*redis_cluster.ClusterNode{drainingPrimary, drainingReplica})
+	podList := &v1.PodList{Items: []v1.Pod{
+		podWithIPAndDrain(drainingPrimary.IP),
+		podWithIPAndDrain(drainingReplica.IP),
+	}}
+
+	primary, replica := findDrainCandidatePrimaryFailover(cluster, podList)
+	assert.Nil(t, primary)
+	assert.Nil(t, replica)
+}
+
+func TestFindDrainCandidatePrimaryFailover_IgnoresStaleSnapshotCondition(t *testing.T) {
+	drainingPrimary := newClusterNode("10.0.0.1", "candidate", redis_cluster.PrimaryNode)
+	drainingPrimary.HasDrainCandidateCond = true
+	healthyReplica := newClusterNode("10.0.0.2", "sibling", redis_cluster.ReplicaNode)
+	healthyReplica.PrimaryID = drainingPrimary.ID
+	cluster := newClusterWithNodes([]*redis_cluster.ClusterNode{drainingPrimary, healthyReplica})
+	podList := &v1.PodList{Items: []v1.Pod{
+		podWithIP(drainingPrimary.IP),
+		podWithIP(healthyReplica.IP),
+	}}
+
+	primary, replica := findDrainCandidatePrimaryFailover(cluster, podList)
+	assert.Nil(t, primary)
+	assert.Nil(t, replica)
+}
+
+func TestFindDrainCandidatePrimaryFailover_LeavesLiveTerminatingPodToTerminationHandler(t *testing.T) {
+	drainingPrimary := newClusterNode("10.0.0.1", "candidate", redis_cluster.PrimaryNode)
+	drainingPrimary.HasDrainCandidateCond = true
+	healthyReplica := newClusterNode("10.0.0.2", "sibling", redis_cluster.ReplicaNode)
+	healthyReplica.PrimaryID = drainingPrimary.ID
+	cluster := newClusterWithNodes([]*redis_cluster.ClusterNode{drainingPrimary, healthyReplica})
+	terminatingPrimaryPod := podWithIPAndDrain(drainingPrimary.IP)
+	now := metav1.Now()
+	terminatingPrimaryPod.DeletionTimestamp = &now
+	podList := &v1.PodList{Items: []v1.Pod{
+		terminatingPrimaryPod,
+		podWithIP(healthyReplica.IP),
+	}}
+
+	primary, replica := findDrainCandidatePrimaryFailover(cluster, podList)
+	assert.Nil(t, primary)
+	assert.Nil(t, replica)
+}
+
 // ── ensureNotPrimary ──
 
 func TestEnsureNotPrimary_NoOpForReplica(t *testing.T) {

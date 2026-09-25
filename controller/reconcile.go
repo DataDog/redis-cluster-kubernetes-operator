@@ -331,10 +331,29 @@ func (r *RedisClusterReconciler) reconcile(ctx context.Context, req ctrl.Request
 	// slots momentarily in transition needs handleTerminatingPods/handleNLA
 	// to unstick it, not a "missing slots" bail-out.
 	terminatingStart := time.Now()
-	if err := r.handleTerminatingPods(ctx, cluster); err != nil {
+	podList, podListErr := r.GetRedisClusterPods(ctx, cluster.RedisCluster)
+	if podListErr != nil {
+		r.Log.Error(podListErr, "Failed to list pods for termination handling, continuing reconcile")
+	} else if err := r.handleTerminatingPodsFromList(ctx, cluster, podList); err != nil {
 		r.Log.Error(err, "Failed to handle terminating pods, continuing reconcile")
 	}
 	_ = r.Metrics.Timing(metrics.TimingReconcileStep, time.Since(terminatingStart).Milliseconds(), metrics.StepTagHandleTerminating)
+	if optionalProviderIsNil(r.LifecycleAdapter) {
+		if podList == nil {
+			podList, podListErr = r.GetRedisClusterPods(ctx, cluster.RedisCluster)
+			if podListErr != nil {
+				return ctrl.Result{}, health.Error, fmt.Errorf("failed to list pods for drain candidate correction: %w", podListErr)
+			}
+		}
+		corrected, err := r.handleDrainCandidatePrimary(ctx, cluster, podList)
+		if err != nil {
+			r.Log.Error(err, "Failed to correct drain candidate primary")
+			return ctrl.Result{}, health.Error, err
+		}
+		if corrected {
+			return ctrl.Result{RequeueAfter: constants.QuickRequeue}, health.Pending, nil
+		}
+	}
 
 	nlaStart := time.Now()
 	stable, nlaErr := r.handleLifecycle(ctx, cluster)
