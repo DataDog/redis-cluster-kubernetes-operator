@@ -29,11 +29,19 @@ import (
 type ManageOptions struct {
 	// Context controls manager shutdown. Nil uses context.Background; embedding
 	// applications should normally provide their own cancellation context.
-	Context              context.Context
-	MetricsAddr          string
-	HealthProbeAddr      string
+	Context context.Context
+	// MetricsAddr is the controller-runtime metrics bind address. "0" disables
+	// the metrics listener.
+	MetricsAddr string
+	// HealthProbeAddr is the controller-runtime health probe bind address.
+	HealthProbeAddr string
+	// EnableLeaderElection controls controller-runtime leader election.
 	EnableLeaderElection bool
-	Metrics              metrics.Metrics
+	// Metrics receives operator metrics. Nil selects Prometheus when MetricsAddr
+	// is enabled and a no-op reporter when it is disabled.
+	Metrics metrics.Metrics
+	// BackupBackendFactory resolves backup providers by name and location. Nil
+	// selects the built-in S3, GCS, and Azure registry, with S3 as the default.
 	BackupBackendFactory controller.BackupBackendFactory
 	// AutoscalingProvider supplies primary-count recommendations. Nil leaves
 	// autoscaling unavailable while preserving status reporting.
@@ -60,7 +68,9 @@ func Manage(scheme *runtime.Scheme, metricsAddr, healthProbeAddr string, enableL
 
 // ManageWithOptions runs the controller with optional integration providers.
 // Nil integrations preserve the reference binary defaults: Prometheus metrics
-// (or no-op when its endpoint is disabled) and AWS S3 backup storage.
+// (or no-op when disabled), the built-in backup registry with S3 selected by
+// default, no external autoscaling or lifecycle provider, and Kubernetes
+// Service DNS for primary endpoint validation.
 func ManageWithOptions(scheme *runtime.Scheme, log logr.Logger, options ManageOptions) error {
 	log.Info("Manager starting", "leader_election", options.EnableLeaderElection)
 	ctx := options.Context

@@ -48,8 +48,8 @@ type LifecyclePodState struct {
 }
 
 // DatadogNLAAdapter enables the legacy Datadog Node Lifecycle Automation
-// recognition and acknowledgement protocol. It is opt-in and is not installed
-// by the public operator startup path.
+// recognition and acknowledgement protocol. It is opt-in and the reference
+// binary does not install it.
 type DatadogNLAAdapter struct{}
 
 func (DatadogNLAAdapter) PodState(pod *v1.Pod) (LifecyclePodState, error) {

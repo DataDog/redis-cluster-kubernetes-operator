@@ -12,7 +12,7 @@ The Redis operators we evaluated did not provide the same combination of Kuberne
 - Namespace-scoped installation and ordinary Kubernetes Service DNS by default.
 - Optional Secret-backed Redis ACL authentication without placing credentials in process arguments, URLs, logs, or ConfigMaps.
 - Prometheus metrics and independent controller-runtime health endpoints.
-- Provider-neutral autoscaling and lifecycle interfaces. No external provider is enabled by the public startup path.
+- Provider-neutral autoscaling, lifecycle, and primary endpoint interfaces. The reference binary enables no external autoscaling or lifecycle provider.
 - S3, Google Cloud Storage, and Azure Blob backup contracts with versioned, hashed manifests.
 
 The API remains `cache.datadoghq.com/v1`, including its existing JSON fields, and the leader-election identity remains unchanged for compatibility.
@@ -50,7 +50,7 @@ See `examples/README.md` for its PVC-backed `nodes.conf` layout. Backups are dis
 
 ## Redis authentication
 
-The public startup supports either no authentication (the default) or a
+The reference binary supports either no authentication (the default) or a
 same-namespace Secret. Configure Redis itself with the same ACL user, then
 create the Secret and reference its keys. The following example reads the
 values without putting either credential in a process argument or a committed
@@ -83,8 +83,8 @@ The Secret is mounted only into the toolbox. A fixed helper reads it inside the 
 
 ## Integration defaults and embedding
 
-The reference binary supplies usable defaults when an embedding application
-does not override either integration:
+The reference binary supplies the following defaults when an embedding
+application omits an integration:
 
 | `mains.ManageOptions` field | Default when omitted |
 | --- | --- |
@@ -120,10 +120,16 @@ registry as `BackupBackendFactory`. The constructor has the signature
 metrics, pass any implementation of `metrics.Metrics`. The compile-checked
 example in `mains/example_test.go` shows the complete explicit-default setup.
 
-Embedding applications can also supply `AutoscalingProvider`,
-`LifecycleAdapter`, and `PrimaryEndpointResolver` through `ManageOptions`.
-These are process startup integrations: RedisCluster resources cannot provide
-implementation code or command templates.
+`AutoscalingProvider` supplies primary-count recommendations. An implementation
+may also implement `AutoscalingWatchProvider` to register watches for resources
+that it owns. `LifecycleAdapter` handles an optional external lifecycle
+acknowledgement protocol. `PrimaryEndpointResolver` selects the hostname used by
+the primary identity stability check; the built-in resolver uses
+`<pod>.<service>.<namespace>.svc`. A resolver can disable hostname validation
+when clients use pod IPs.
+
+These are process startup integrations supplied through `ManageOptions`.
+RedisCluster resources cannot provide implementation code or command templates.
 
 ## Metrics and health
 
@@ -136,9 +142,9 @@ Liveness and readiness use a separate listener on port `8081`:
 
 Metrics can be disabled independently without disabling health probes.
 
-## Autoscaling and lifecycle providers
+## Autoscaling, lifecycle, and endpoint providers
 
-The reference binary does not register DatadogMetric, WPA, or other external CRD schemes. An embedding application can register provider CRDs in the scheme passed to `ManageWithOptions` and supply an autoscaling recommendation provider through its options. If autoscaling is configured without one, reconciliation continues and reports `ProviderUnavailable` in status. Kubernetes termination and drain safety remain active; provider-specific lifecycle acknowledgement is opt-in and can be supplied through the same startup options.
+The reference binary does not register DatadogMetric, WPA, or other external CRD schemes. An embedding application can register provider CRDs in the runtime scheme passed to `ManageWithOptions` and set `ManageOptions.AutoscalingProvider`. If autoscaling is configured without a provider, reconciliation continues and reports `ProviderUnavailable` in status. Kubernetes termination and drain safety remain active without `ManageOptions.LifecycleAdapter`; an adapter adds an external acknowledgement protocol. `ManageOptions.PrimaryEndpointResolver` supports environments whose Redis clients use a hostname other than Kubernetes Service DNS, or use pod IPs only.
 
 ## Backups and restore
 
@@ -167,7 +173,7 @@ portability.
 
 - Only Redis 8.6 and Kubernetes 1.33 are claimed as compatible.
 - The repository does not publish an image or chart during Phase 1.
-- No autoscaling recommendation provider or provider-specific lifecycle adapter is enabled by public startup.
+- The reference binary enables no autoscaling recommendation provider or provider-specific lifecycle adapter.
 - Primary downscale is not supported in the initial public release. Lowering `spec.primaries` does not lower the retained effective target or remove Redis pods.
 - Blue-green rollout qualification covers image changes. Resource-only pod template changes are not currently included in the rollout hash.
 - Backup deployment is not provided by the reference workload and requires the prerequisites above.

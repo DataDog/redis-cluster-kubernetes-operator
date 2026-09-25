@@ -62,11 +62,12 @@ const (
 	RedisClusterConditionDegraded    RedisClusterConditionType = "Degraded"
 )
 
-// RedisClusterAutoscalingMetricPolicy configures one WPA recommendation signal.
+// RedisClusterAutoscalingMetricPolicy configures one autoscaling recommendation signal.
 type RedisClusterAutoscalingMetricPolicy struct {
-	// HighWatermark is the absolute WPA threshold for the metric utilization ratio.
+	// HighWatermark is the utilization ratio above which scale-up may be recommended.
 	HighWatermark resource.Quantity `json:"highWatermark"`
-	// UpscaleDelaySeconds is the WPA delay above the high watermark.
+	// UpscaleDelaySeconds is how long the signal must remain above HighWatermark
+	// before scale-up may be recommended.
 	// +kubebuilder:validation:Minimum=0
 	UpscaleDelaySeconds *int32 `json:"upscaleDelaySeconds,omitempty"`
 }

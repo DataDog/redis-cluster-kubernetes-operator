@@ -14,8 +14,8 @@ import (
 )
 
 // ExampleManageWithOptions_explicitDefaults shows how an embedding binary can
-// select the same Prometheus and cloud-storage integrations used by the
-// reference binary. Leaving Metrics, BackupBackendFactory, and
+// select the same Prometheus, cloud storage, and primary endpoint integrations
+// used by the reference binary. Leaving Metrics, BackupBackendFactory, and
 // PrimaryEndpointResolver nil has the same effect; explicit construction is
 // useful when the application wants to add providers to the registry before
 // starting the manager.
