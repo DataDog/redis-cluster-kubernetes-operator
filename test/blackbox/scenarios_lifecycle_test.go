@@ -224,9 +224,17 @@ func TestCleanroom_DrainCandidateSafety(t *testing.T) {
 	if err := h.client.Delete(h.ctx, &primary); err != nil {
 		t.Fatal(err)
 	}
+	var lastTopologyError error
+	topologyError := func(err error) error {
+		lastTopologyError = err
+		return err
+	}
 	h.eventually("healthy sibling promoted instead of drain candidate", topologyTimeout, func(ctx context.Context) error {
 		raw, err := h.redisInPod(ctx, candidate, "CLUSTER", "NODES")
 		if err != nil {
+			if lastTopologyError != nil {
+				return fmt.Errorf("last topology mismatch: %v; latest cluster query failed: %w", lastTopologyError, err)
+			}
 			return err
 		}
 		currentNodes := parseClusterNodes(raw)
@@ -240,24 +248,24 @@ func TestCleanroom_DrainCandidateSafety(t *testing.T) {
 			}
 		}
 		if currentCandidate == nil || currentSibling == nil {
-			return fmt.Errorf("candidate or sibling is missing from cluster view")
+			return topologyError(fmt.Errorf("candidate or sibling is missing from cluster view"))
 		}
 		if currentCandidate.Primary || currentCandidate.MasterID != siblingID {
-			return fmt.Errorf("drain candidate %s role primary=%t master=%s, want replica of %s", candidateID, currentCandidate.Primary, currentCandidate.MasterID, siblingID)
+			return topologyError(fmt.Errorf("drain candidate %s role primary=%t master=%s, want replica of %s", candidateID, currentCandidate.Primary, currentCandidate.MasterID, siblingID))
 		}
 		if !currentSibling.Primary || currentSibling.Failed {
-			return fmt.Errorf("healthy sibling %s was not promoted", siblingID)
+			return topologyError(fmt.Errorf("healthy sibling %s was not promoted", siblingID))
 		}
 		primaries, replicas := topologyCounts(currentNodes)
 		if primaries != 3 || replicas != 5 {
-			return fmt.Errorf("topology has %d primaries/%d replicas while former primary is held, want 3/5", primaries, replicas)
+			return topologyError(fmt.Errorf("topology has %d primaries/%d replicas while former primary is held, want 3/5", primaries, replicas))
 		}
 		coverage, err := slotCoverage(currentNodes)
 		if err != nil {
-			return err
+			return topologyError(err)
 		}
 		if coverage != totalRedisSlots {
-			return fmt.Errorf("slot coverage=%d, want %d", coverage, totalRedisSlots)
+			return topologyError(fmt.Errorf("slot coverage=%d, want %d", coverage, totalRedisSlots))
 		}
 		return nil
 	})

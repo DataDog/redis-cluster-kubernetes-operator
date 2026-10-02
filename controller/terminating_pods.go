@@ -15,7 +15,10 @@ func (r *RedisClusterReconciler) handleTerminatingPods(ctx context.Context, clus
 	if err != nil {
 		return fmt.Errorf("handleTerminatingPods: failed to list pods: %w", err)
 	}
+	return r.handleTerminatingPodsFromList(ctx, cluster, podList)
+}
 
+func (r *RedisClusterReconciler) handleTerminatingPodsFromList(ctx context.Context, cluster *redis_cluster.Cluster, podList *v1.PodList) error {
 	var primaryCount, replicaCount, skippedNLACount, otherCount int
 	for i := range podList.Items {
 		pod := &podList.Items[i]
@@ -75,6 +78,49 @@ func (r *RedisClusterReconciler) handleTerminatingPods(ctx context.Context, clus
 		"other", otherCount)
 
 	return nil
+}
+
+// handleDrainCandidatePrimary corrects a Redis failover that promoted a pod
+// marked as a drain candidate. Redis does not know about Kubernetes pod
+// conditions, so it can win the election race before handleTerminatingPods
+// selects a healthy sibling.
+func (r *RedisClusterReconciler) handleDrainCandidatePrimary(ctx context.Context, cluster *redis_cluster.Cluster, podList *v1.PodList) (bool, error) {
+	primary, replica := findDrainCandidatePrimaryFailover(cluster, podList)
+	if primary == nil {
+		return false, nil
+	}
+
+	r.Log.Info("Correcting drain candidate promoted by Redis failover",
+		"primaryPod", primary.PodName,
+		"primaryNodeID", primary.ID,
+		"replicaPod", replica.PodName,
+		"replicaNodeID", replica.ID)
+	if err := r.performFailover(ctx, cluster, replica, primary); err != nil {
+		_ = r.Metrics.CountBadSituation("drain_candidate_primary_failover_failed", "pod_name:"+primary.PodName)
+		return false, fmt.Errorf("failed to demote drain candidate primary %s: %w", primary.ID, err)
+	}
+
+	return true, nil
+}
+
+// findDrainCandidatePrimaryFailover returns one live, drain-marked primary and
+// a healthy sibling that can replace it. Terminating primaries remain owned by
+// handleTerminatingPods, and a stale condition in the cluster snapshot is
+// confirmed against the live Pod before any Redis operation is attempted.
+func findDrainCandidatePrimaryFailover(cluster *redis_cluster.Cluster, podList *v1.PodList) (*redis_cluster.ClusterNode, *redis_cluster.ClusterNode) {
+	for _, primary := range cluster.Nodes[redis_cluster.PrimaryNode] {
+		if primary.IsTerminating || !primary.HasDrainCandidateCond {
+			continue
+		}
+		pod := findPodByIP(podList, primary.IP)
+		if pod == nil || pod.DeletionTimestamp != nil || !redis_cluster.PodHasDrainCandidateCondition(pod) {
+			continue
+		}
+		if replica := findNonDrainingReplica(cluster, podList, primary); replica != nil {
+			return primary, replica
+		}
+	}
+	return nil, nil
 }
 
 // findNonDrainingReplica returns the first replica of `primary` whose pod is
