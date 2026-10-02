@@ -37,6 +37,8 @@ jobs:
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install artifact scanner
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ripgrep
       - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
         with:
           go-version-file: go.mod
