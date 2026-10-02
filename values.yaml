@@ -9,7 +9,11 @@ operator:
   image:
     repository: ghcr.io/datadog/redis-cluster-kubernetes-operator
     tag: "0.1.0"
+    # When set, digest takes precedence over tag and renders repository@digest.
+    digest: ""
     pullPolicy: IfNotPresent
+  # Secret names only. The Secrets must already exist in the release namespace.
+  imagePullSecrets: []
   serviceAccount:
     create: true
     name: ""
