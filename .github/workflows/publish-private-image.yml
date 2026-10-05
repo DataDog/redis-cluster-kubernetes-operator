@@ -188,6 +188,11 @@ jobs:
             --arg workflow_git_ref "$GITHUB_REF" \
             --arg workflow_path ".github/workflows/publish-private-image.yml" \
             --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg workflow_sha "$GITHUB_SHA" \
+            --arg event_name "$GITHUB_EVENT_NAME" \
+            --arg repository_id "$GITHUB_REPOSITORY_ID" \
+            --arg repository_owner_id "$GITHUB_REPOSITORY_OWNER_ID" \
+            --arg runner_environment "$RUNNER_ENVIRONMENT" \
             --arg run_id "$GITHUB_RUN_ID" \
             --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
             '{
@@ -204,11 +209,24 @@ jobs:
                     path: $workflow_path
                   }
                 },
-                internalParameters: {},
-                resolvedDependencies: [{
-                  uri: ("git+https://github.com/" + $repository + "@refs/heads/" + $source_branch),
-                  digest: {gitCommit: $source_sha}
-                }]
+                internalParameters: {
+                  github: {
+                    event_name: $event_name,
+                    repository_id: $repository_id,
+                    repository_owner_id: $repository_owner_id,
+                    runner_environment: $runner_environment
+                  }
+                },
+                resolvedDependencies: [
+                  {
+                    uri: ("git+https://github.com/" + $repository + "@" + $workflow_git_ref),
+                    digest: {gitCommit: $workflow_sha}
+                  },
+                  {
+                    uri: ("git+https://github.com/" + $repository + "@refs/heads/" + $source_branch),
+                    digest: {gitCommit: $source_sha}
+                  }
+                ]
               },
               runDetails: {
                 builder: {id: ("https://github.com/" + $workflow_ref)},
@@ -220,7 +238,8 @@ jobs:
           jq -e --arg sha "$SOURCE_SHA" \
             '.buildDefinition.buildType == "https://actions.github.io/buildtypes/workflow/v1" and
              .buildDefinition.externalParameters.workflow.path == ".github/workflows/publish-private-image.yml" and
-             .buildDefinition.resolvedDependencies[0].digest.gitCommit == $sha' \
+             .buildDefinition.internalParameters.github.event_name == "workflow_dispatch" and
+             any(.buildDefinition.resolvedDependencies[]; .digest.gitCommit == $sha)' \
             "$predicate" >/dev/null
           echo "path=$predicate" >> "$GITHUB_OUTPUT"
       - name: Attest build provenance
@@ -241,7 +260,7 @@ jobs:
           jq -r '.dsseEnvelope.payload' "$BUNDLE_PATH" \
             | base64 --decode \
             | jq -e --arg sha "$SOURCE_SHA" \
-                '.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit == $sha' \
+                'any(.predicate.buildDefinition.resolvedDependencies[]; .digest.gitCommit == $sha)' \
                 >/dev/null
       - name: Verify manifest platforms and report digest
         env:
