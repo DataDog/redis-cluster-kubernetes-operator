@@ -185,22 +185,28 @@ jobs:
             --arg repository "$GITHUB_REPOSITORY" \
             --arg source_branch "$SOURCE_BRANCH" \
             --arg source_sha "$SOURCE_SHA" \
+            --arg workflow_git_ref "$GITHUB_REF" \
+            --arg workflow_path ".github/workflows/publish-private-image.yml" \
             --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
             --arg run_id "$GITHUB_RUN_ID" \
             --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
             '{
               buildDefinition: {
-                buildType: ("https://github.com/" + $workflow_ref),
+                buildType: "https://actions.github.io/buildtypes/workflow/v1",
                 externalParameters: {
-                  source: {
-                    repository: ("https://github.com/" + $repository),
-                    branch: $source_branch,
+                  inputs: {
+                    source_branch: $source_branch,
                     commit: $source_sha
+                  },
+                  workflow: {
+                    ref: $workflow_git_ref,
+                    repository: ("https://github.com/" + $repository),
+                    path: $workflow_path
                   }
                 },
                 internalParameters: {},
                 resolvedDependencies: [{
-                  uri: ("git+https://github.com/" + $repository + ".git"),
+                  uri: ("git+https://github.com/" + $repository + "@refs/heads/" + $source_branch),
                   digest: {gitCommit: $source_sha}
                 }]
               },
@@ -212,7 +218,9 @@ jobs:
               }
             }' > "$predicate"
           jq -e --arg sha "$SOURCE_SHA" \
-            '.buildDefinition.resolvedDependencies[0].digest.gitCommit == $sha' \
+            '.buildDefinition.buildType == "https://actions.github.io/buildtypes/workflow/v1" and
+             .buildDefinition.externalParameters.workflow.path == ".github/workflows/publish-private-image.yml" and
+             .buildDefinition.resolvedDependencies[0].digest.gitCommit == $sha' \
             "$predicate" >/dev/null
           echo "path=$predicate" >> "$GITHUB_OUTPUT"
       - name: Attest build provenance
