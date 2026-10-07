@@ -131,7 +131,7 @@ jobs:
       attestations: write
       id-token: write
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      digest: ${{ steps.export.outputs.digest }}
       tag: ${{ steps.identity.outputs.tag }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -161,19 +161,46 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and publish one immutable tag
+      - name: Build, publish, and export one immutable image
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ env.IMAGE }}:${{ steps.identity.outputs.tag }}
+          outputs: |
+            type=registry,name=${{ env.IMAGE }}:${{ steps.identity.outputs.tag }}
+            type=oci,name=${{ env.IMAGE }}:${{ steps.identity.outputs.tag }},dest=${{ runner.temp }}/redis-operator.oci.tar
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.identity.outputs.sha }}
           sbom: true
           provenance: false
+      - name: Verify exported OCI image matches the published manifest
+        id: export
+        env:
+          OCI_ARCHIVE: ${{ runner.temp }}/redis-operator.oci.tar
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          test "$REPOSITORY_PRIVATE" = "true"
+          registry_digest="sha256:$(
+            docker buildx imagetools inspect "$IMAGE:$TAG" --raw \
+              | sha256sum \
+              | cut -d ' ' -f 1
+          )"
+          archive_digest="$(
+            tar -xOf "$OCI_ARCHIVE" index.json \
+              | jq -er '
+                  if (.manifests | length) == 1 then
+                    .manifests[0].digest
+                  else
+                    error("expected exactly one top-level OCI manifest")
+                  end
+                '
+          )"
+          test "$archive_digest" = "$registry_digest"
+          echo "digest=$registry_digest" >> "$GITHUB_OUTPUT"
+          echo "archive=$OCI_ARCHIVE" >> "$GITHUB_OUTPUT"
       - name: Generate feature-source provenance predicate
         id: provenance
         env:
@@ -247,7 +274,7 @@ jobs:
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.export.outputs.digest }}
           predicate-type: https://slsa.dev/provenance/v1
           predicate-path: ${{ steps.provenance.outputs.path }}
           push-to-registry: true
@@ -262,19 +289,34 @@ jobs:
             | jq -e --arg sha "$SOURCE_SHA" \
                 'any(.predicate.buildDefinition.resolvedDependencies[]; .digest.gitCommit == $sha)' \
                 >/dev/null
-      - name: Verify manifest platforms and report digest
+      - name: Verify manifest platforms
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-          TAG: ${{ steps.identity.outputs.tag }}
+          DIGEST: ${{ steps.export.outputs.digest }}
         run: |
           manifest="$(docker buildx imagetools inspect "$IMAGE@$DIGEST")"
           grep -Eq '^[[:space:]]*Platform:[[:space:]]+linux/amd64$' <<<"$manifest"
           grep -Eq '^[[:space:]]*Platform:[[:space:]]+linux/arm64$' <<<"$manifest"
+      - name: Retain private OCI image for internal staging import
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: redis-operator-oci-${{ needs.source.outputs.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.export.outputs.archive }}
+            ${{ steps.attest.outputs.bundle-path }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Report published image and OCI artifact
+        env:
+          DIGEST: ${{ steps.export.outputs.digest }}
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
           {
             echo "### Private staging image"
             echo
             echo "- Tag: \`$IMAGE:$TAG\`"
             echo "- Digest: \`$DIGEST\`"
             echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+            echo "- OCI image and provenance artifact: \`redis-operator-oci-${{ needs.source.outputs.sha }}-${{ github.run_attempt }}\` (1-day retention)"
             echo "- Visibility: retain the GHCR package as private"
           } >> "$GITHUB_STEP_SUMMARY"
