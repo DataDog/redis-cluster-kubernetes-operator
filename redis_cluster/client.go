@@ -363,9 +363,12 @@ func (cc *ClusterClient) getPods(ctx context.Context, namespace string, clusterN
 
 // GetRedisClusterPods gets the pods owned by the StatefulSet.
 func (cc *ClusterClient) GetRedisClusterPods(ctx context.Context, redisCluster *cachev1.RedisCluster) (*corev1.PodList, error) {
-	labels := redisCluster.Spec.StatefulsetTemplate.Labels
+	labels := maps.Clone(redisCluster.Spec.StatefulsetTemplate.Labels)
+	if labels == nil {
+		labels = make(map[string]string)
+	}
 	if redisCluster.Spec.StatefulsetTemplate.Spec.Selector != nil {
-		labels = redisCluster.Spec.StatefulsetTemplate.Spec.Selector.MatchLabels
+		maps.Copy(labels, redisCluster.Spec.StatefulsetTemplate.Spec.Selector.MatchLabels)
 	}
 	return cc.getPods(ctx, redisCluster.Namespace, redisCluster.Name, labels)
 }

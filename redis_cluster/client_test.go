@@ -1,9 +1,11 @@
 package redis_cluster
 
 import (
+	"context"
 	"testing"
 
 	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -12,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestGetFilterLabels(t *testing.T) {
@@ -48,6 +51,47 @@ func TestGetFilterLabels(t *testing.T) {
 		"will_be":             "filtered_out",
 	})
 	ast.NotNil(err3)
+}
+
+func TestGetRedisClusterPodsUsesTemplateLabelsMissingFromSelector(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, cachev1.AddToScheme(scheme))
+
+	redisCluster := &cachev1.RedisCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "redis-cluster-test", Namespace: "default"},
+		Spec: cachev1.RedisClusterSpec{StatefulsetTemplate: appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+				"app":                "redis",
+				"chart_name":         "redis-cluster",
+				"redis_cluster_name": "redis-cluster-test",
+			}},
+			Spec: appsv1.StatefulSetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+				"app":                "redis",
+				"redis_cluster_name": "redis-cluster-test",
+				"release":            "redis-cluster",
+			}}},
+		}},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "redis-cluster-test-0",
+		Namespace: "default",
+		Labels: map[string]string{
+			"app":                "redis",
+			"chart_name":         "redis-cluster",
+			"redis_cluster_name": "redis-cluster-test",
+			"release":            "redis-cluster",
+		},
+	}}
+	client := &ClusterClient{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build(),
+		Log:    logr.Discard(),
+	}
+
+	pods, err := client.GetRedisClusterPods(context.Background(), redisCluster)
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 1)
+	assert.Equal(t, pod.Name, pods.Items[0].Name)
 }
 
 func TestGetPodIndexFromName(t *testing.T) {
