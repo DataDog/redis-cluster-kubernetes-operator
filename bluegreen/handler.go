@@ -873,14 +873,7 @@ func (h *Handler) bgPromote(ctx context.Context, cluster *redis_cluster.Cluster)
 		return ctrl.Result{RequeueAfter: constants.BlueGreenInterShardFailoverDelay}, health.Warn, nil
 	}
 
-	useForce := bgStatus.ResumeForwardAttempts >= int32(constants.BlueGreenForceAttemptThreshold)
-	useTakeover := bgStatus.ResumeForwardAttempts >= int32(constants.BlueGreenTakeoverAttemptThreshold)
-	failoverMode := "soft"
-	if useTakeover {
-		failoverMode = "TAKEOVER"
-	} else if useForce {
-		failoverMode = "FORCE"
-	}
+	useForce, useTakeover, failoverMode := failoverModeForAttempts(bgStatus.ResumeForwardAttempts)
 
 	batchSize := len(bgStatus.ShardMapping) * constants.BlueGreenMaxBatchKeyspacePercent / 100
 	if batchSize < 1 {
@@ -968,6 +961,16 @@ func (h *Handler) bgPromote(ctx context.Context, cluster *redis_cluster.Cluster)
 		return ctrl.Result{RequeueAfter: time.Second}, health.Warn, nil
 	}
 	return ctrl.Result{RequeueAfter: constants.BlueGreenInterShardFailoverDelay}, health.Warn, nil
+}
+
+func failoverModeForAttempts(attempts int32) (force bool, takeover bool, mode string) {
+	if attempts >= int32(constants.BlueGreenTakeoverAttemptThreshold) {
+		return false, true, "TAKEOVER"
+	}
+	if attempts >= int32(constants.BlueGreenForceAttemptThreshold) {
+		return true, false, "FORCE"
+	}
+	return false, false, "soft"
 }
 
 func (h *Handler) finishPromotion(ctx, viewCtx context.Context, cluster *redis_cluster.Cluster, bgStatus *cachev1.BlueGreenStatus) (ctrl.Result, health.ClusterHealth, error) {
