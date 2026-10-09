@@ -47,6 +47,7 @@ trap cleanup EXIT
 
 cleanroom_validate_run_id "$RUN_ID"
 cleanroom_require_commands docker go helm kind kubectl
+cleanroom_require_kind_version 0 30 0
 "$REPO_ROOT/ci/cleanroom/verify-lanes.sh"
 
 if kind get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"; then

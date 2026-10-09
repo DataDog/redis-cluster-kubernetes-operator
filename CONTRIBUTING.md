@@ -18,9 +18,13 @@ go test ./...
 go vet ./...
 helm lint .
 helm template redis-cluster-kubernetes-operator . --namespace redis-operator
+make verify-crd-contract
 ```
 
-Changes affecting the CRD should also run the contract checker and a clean-cluster installation test. Backup, authentication, toolbox, and command-execution changes require security review.
+Changes affecting the CRD should also run `make verify-crd-contract` and a
+clean-cluster installation test. Use `make local-up` for an interactive cluster
+or `make cleanroom-smoke` for the disposable packaged-operator gate. Backup,
+authentication, toolbox, and command-execution changes require security review.
 
 ## Pull requests
 

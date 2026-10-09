@@ -29,6 +29,8 @@ jobs:
         run: ci/cleanroom/test-verify-artifacts.sh
       - name: Verify bounded artifact collection
         run: ci/cleanroom/test-collect-artifacts.sh
+      - name: Verify KIND version guard
+        run: bash ci/cleanroom/test-kind-version.sh
       - name: Verify EKS cleanup behavior
         run: ci/cleanroom/cleanup-eks_test.sh
       - run: go test ./...
