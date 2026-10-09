@@ -20,7 +20,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var errNoPrimaryNodesForUnassignedSlots = errors.New("no primary nodes available for unassigned slots")
+var (
+	errNoPrimaryNodesForUnassignedSlots = errors.New("no primary nodes available for unassigned slots")
+	errFailoverSuperseded               = errors.New("failover superseded by synchronized primary replacement")
+	errConnectivityRepairPending        = errors.New("connectivity repair is converging")
+)
+
+type cleanFailoverAbortCheck func(context.Context, string) (bool, error)
 
 func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *redis_cluster.Cluster) (*redis_cluster.Cluster, error) {
 
@@ -1255,7 +1261,7 @@ func (r *RedisClusterReconciler) detectAndFixPartitionedNodes(ctx context.Contex
 	if err != nil {
 		return cluster, err
 	}
-	return refreshed, fmt.Errorf("connectivity repair attempted for %d node(s); requeueing", len(orphanedNodes)+len(splitNodes))
+	return refreshed, fmt.Errorf("%w: attempted for %d node(s)", errConnectivityRepairPending, len(orphanedNodes)+len(splitNodes))
 }
 
 // addPrimaries adds missing primaries from outsider nodes, and refreshes the cluster.
@@ -1595,6 +1601,16 @@ func shouldRetryCreateAfterHardReset(err error) bool {
 }
 
 func (r *RedisClusterReconciler) performFailover(ctx context.Context, cluster *redis_cluster.Cluster, replicaNode *redis_cluster.ClusterNode, primaryNode *redis_cluster.ClusterNode) error {
+	return r.performFailoverWithAbort(ctx, cluster, replicaNode, primaryNode, nil)
+}
+
+func (r *RedisClusterReconciler) performFailoverWithAbort(
+	ctx context.Context,
+	cluster *redis_cluster.Cluster,
+	replicaNode *redis_cluster.ClusterNode,
+	primaryNode *redis_cluster.ClusterNode,
+	abortCheck cleanFailoverAbortCheck,
+) error {
 	start := time.Now()
 
 	r.Log.Info("Initiating failover",
@@ -1603,7 +1619,13 @@ func (r *RedisClusterReconciler) performFailover(ctx context.Context, cluster *r
 		"replicaNodeID", replicaNode.ID,
 		"replicaPod", replicaNode.PodName)
 
-	if err := r.waitForReplicaReadyForCleanFailover(ctx, cluster, replicaNode, primaryNode); err != nil {
+	if err := r.waitForReplicaReadyForCleanFailover(ctx, cluster, replicaNode, primaryNode, abortCheck); err != nil {
+		if errors.Is(err, errFailoverSuperseded) {
+			r.Log.Info("Skipping failover because the replacement primary is synchronized",
+				"primaryNodeID", primaryNode.ID,
+				"replicaNodeID", replicaNode.ID)
+			return err
+		}
 		r.Log.Error(err, "Replica is not ready for clean failover",
 			"primaryNodeID", primaryNode.ID,
 			"replicaNodeID", replicaNode.ID)
@@ -1613,6 +1635,20 @@ func (r *RedisClusterReconciler) performFailover(ctx context.Context, cluster *r
 	// Request a clean failover.
 	err := cluster.Toolbox.Failover(replicaNode, false, false)
 	if err != nil {
+		if abortCheck != nil {
+			if info, infoErr := cluster.Toolbox.GetReplicationInfo(replicaNode.IP); infoErr == nil {
+				abort, abortErr := abortCheck(ctx, info)
+				if abortErr != nil {
+					return abortErr
+				}
+				if abort {
+					r.Log.Info("Failover command was superseded by the synchronized replacement primary",
+						"primaryNodeID", primaryNode.ID,
+						"replicaNodeID", replicaNode.ID)
+					return errFailoverSuperseded
+				}
+			}
+		}
 		r.Log.Error(err, "Failover command failed",
 			"primaryNodeID", primaryNode.ID,
 			"replicaNodeID", replicaNode.ID)
@@ -1620,11 +1656,34 @@ func (r *RedisClusterReconciler) performFailover(ctx context.Context, cluster *r
 	}
 
 	r.Log.Info("Waiting for current primary to become the replica", "primary_node", primaryNode.ID)
+	var completionErr error
+	var superseded bool
 	_, success := r.retryRefreshClusterUntil(ctx, cluster, func(c *redis_cluster.Cluster) bool {
-		return rolesHaveBeenSwapped(c, primaryNode, replicaNode)
+		if rolesHaveBeenSwapped(c, primaryNode, replicaNode) {
+			return true
+		}
+		if abortCheck == nil {
+			return false
+		}
+		info, infoErr := c.Toolbox.GetReplicationInfo(replicaNode.IP)
+		if infoErr != nil {
+			return false
+		}
+		superseded, completionErr = abortCheck(ctx, info)
+		return superseded || completionErr != nil
 	}, cluster.Timeouts.PollInterval, cluster.Timeouts.OperationTimeout)
 
 	duration := time.Since(start).Milliseconds()
+	if completionErr != nil {
+		return completionErr
+	}
+	if superseded {
+		r.Log.Info("Failover completion was superseded by the synchronized replacement primary",
+			"primaryNodeID", primaryNode.ID,
+			"replicaNodeID", replicaNode.ID,
+			"duration_ms", duration)
+		return errFailoverSuperseded
+	}
 
 	if !success {
 		r.Log.Error(fmt.Errorf("failover timeout"), "Failed to observe failover completion",
@@ -1632,7 +1691,7 @@ func (r *RedisClusterReconciler) performFailover(ctx context.Context, cluster *r
 			"replicaNodeID", replicaNode.ID,
 			"duration_ms", duration)
 		_ = r.Metrics.Timing(metrics.TimingFailoverDuration, duration, "status:timeout")
-		return fmt.Errorf("failed to observe the failover after %v", constants.OperationTimeout)
+		return fmt.Errorf("failed to observe the failover after %v", cluster.Timeouts.OperationTimeout)
 	}
 
 	r.Log.Info("Failover complete",
@@ -1645,12 +1704,29 @@ func (r *RedisClusterReconciler) performFailover(ctx context.Context, cluster *r
 	return nil
 }
 
-func (r *RedisClusterReconciler) waitForReplicaReadyForCleanFailover(ctx context.Context, cluster *redis_cluster.Cluster, replicaNode *redis_cluster.ClusterNode, primaryNode *redis_cluster.ClusterNode) error {
+func (r *RedisClusterReconciler) waitForReplicaReadyForCleanFailover(
+	ctx context.Context,
+	cluster *redis_cluster.Cluster,
+	replicaNode *redis_cluster.ClusterNode,
+	primaryNode *redis_cluster.ClusterNode,
+	abortCheck cleanFailoverAbortCheck,
+) error {
 	deadline := time.Now().Add(cluster.Timeouts.OperationTimeout)
 	for {
 		info, err := cluster.Toolbox.GetReplicationInfo(replicaNode.IP)
-		if err == nil && replicaReadyForCleanFailover(info, primaryNode.IP) {
-			return nil
+		if err == nil {
+			if abortCheck != nil {
+				abort, abortErr := abortCheck(ctx, info)
+				if abortErr != nil {
+					return abortErr
+				}
+				if abort {
+					return errFailoverSuperseded
+				}
+			}
+			if replicaReadyForCleanFailover(info, primaryNode.IP) {
+				return nil
+			}
 		}
 		if time.Now().After(deadline) {
 			if err != nil {
@@ -1674,6 +1750,11 @@ func (r *RedisClusterReconciler) waitForReplicaReadyForCleanFailover(ctx context
 }
 
 func replicaReadyForCleanFailover(info, primaryIP string) bool {
+	masterHost, synchronized := synchronizedReplicaMaster(info)
+	return synchronized && masterHost == primaryIP
+}
+
+func synchronizedReplicaMaster(info string) (string, bool) {
 	fields := make(map[string]string)
 	for _, line := range strings.Split(info, "\n") {
 		key, value, found := strings.Cut(strings.TrimSpace(line), ":")
@@ -1681,8 +1762,8 @@ func replicaReadyForCleanFailover(info, primaryIP string) bool {
 			fields[key] = value
 		}
 	}
-	return fields["role"] == "slave" &&
-		fields["master_host"] == primaryIP &&
+	return fields["master_host"], fields["role"] == "slave" &&
+		fields["master_host"] != "" &&
 		fields["master_link_status"] == "up" &&
 		fields["master_sync_in_progress"] == "0"
 }

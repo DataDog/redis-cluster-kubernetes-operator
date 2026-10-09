@@ -675,8 +675,9 @@ func TestEnsureNotPrimary_NoOpForReplica(t *testing.T) {
 	rec := &recordingMetrics{}
 	r := newTestReconcilerWithMetrics(t, fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build(), rec)
 
-	err := r.ensureNotPrimary(context.Background(), cluster, &v1.PodList{}, node, "pod-r1")
+	forgetDemotedNode, err := r.ensureNotPrimary(context.Background(), cluster, &v1.PodList{}, node, &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-r1"}})
 	assert.NoError(t, err, "non-primary should be a no-op")
+	assert.False(t, forgetDemotedNode)
 }
 
 func TestEnsureNotPrimary_NoReplicaAvailable(t *testing.T) {
@@ -686,8 +687,9 @@ func TestEnsureNotPrimary_NoReplicaAvailable(t *testing.T) {
 	rec := &recordingMetrics{}
 	r := newTestReconcilerWithMetrics(t, fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build(), rec)
 
-	err := r.ensureNotPrimary(context.Background(), cluster, &v1.PodList{}, primary, "pod-p1")
+	forgetDemotedNode, err := r.ensureNotPrimary(context.Background(), cluster, &v1.PodList{}, primary, &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-p1"}})
 	require.Error(t, err, "should error when there is no replica to promote")
+	assert.False(t, forgetDemotedNode)
 
 	got, ok := rec.findBadSituation("ensure_not_primary_no_replica")
 	require.True(t, ok)
@@ -994,6 +996,68 @@ func TestReplicaReadyForCleanFailover(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			assert.Equal(t, test.want, replicaReadyForCleanFailover(test.info, "10.0.0.1"))
+		})
+	}
+}
+
+func TestReplicaFollowsReplacementPrimary(t *testing.T) {
+	const readyForReplacement = "role:slave\r\nmaster_host:10.0.0.9\r\nmaster_link_status:up\r\nmaster_sync_in_progress:0\r\n"
+	original := terminatingPod("redis-cluster-foo-0", "10.0.0.1", nil)
+	original.UID = "old-uid"
+
+	tests := []struct {
+		name    string
+		current *v1.Pod
+		info    string
+		want    bool
+	}{
+		{
+			name: "replacement is synchronized",
+			current: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: original.Name, Namespace: original.Namespace, UID: "new-uid"},
+				Status:     v1.PodStatus{PodIP: "10.0.0.9"},
+			},
+			info: readyForReplacement,
+			want: true,
+		},
+		{
+			name: "same pod uid",
+			current: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: original.Name, Namespace: original.Namespace, UID: original.UID},
+				Status:     v1.PodStatus{PodIP: "10.0.0.9"},
+			},
+			info: readyForReplacement,
+		},
+		{
+			name: "replica follows another address",
+			current: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: original.Name, Namespace: original.Namespace, UID: "new-uid"},
+				Status:     v1.PodStatus{PodIP: "10.0.0.8"},
+			},
+			info: readyForReplacement,
+		},
+		{
+			name: "replacement link is down",
+			current: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: original.Name, Namespace: original.Namespace, UID: "new-uid"},
+				Status:     v1.PodStatus{PodIP: "10.0.0.9"},
+			},
+			info: strings.Replace(readyForReplacement, "master_link_status:up", "master_link_status:down", 1),
+		},
+		{name: "replacement is not created", info: readyForReplacement},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(newTestScheme(t))
+			if test.current != nil {
+				builder = builder.WithObjects(test.current)
+			}
+			r := newTestReconciler(t, builder.Build())
+
+			got, err := r.replicaFollowsReplacementPrimary(context.Background(), original, test.info)
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
 		})
 	}
 }
