@@ -14,6 +14,62 @@ readonly KUBECONFIG_PATH="${LOCAL_KUBECONFIG:-$REPO_ROOT/.local/kubeconfig}"
 readonly REDIS_CLUSTER_NAME="cache"
 readonly EXPECTED_PODS=6
 
+redis_topology_is_ready() {
+  awk '
+    BEGIN { valid = 1 }
+    NF < 8 { valid = 0; next }
+    {
+      node_id = $1
+      flags = $3
+      primary_id = $4
+      link_state = $8
+      is_primary = 0
+      is_replica = 0
+
+      flag_count = split(flags, node_flags, ",")
+      for (i = 1; i <= flag_count; i++) {
+        if (node_flags[i] == "master" || node_flags[i] == "primary") {
+          is_primary = 1
+        } else if (node_flags[i] == "slave" || node_flags[i] == "replica") {
+          is_replica = 1
+        } else if (node_flags[i] == "fail" || node_flags[i] == "fail?") {
+          valid = 0
+        }
+      }
+
+      if (link_state != "connected" || is_primary == is_replica) {
+        valid = 0
+      } else if (is_primary) {
+        primary_count++
+        primaries[node_id] = 1
+        if (primary_id != "-") {
+          valid = 0
+        }
+      } else {
+        replica_count++
+        replica_primary[node_id] = primary_id
+      }
+      node_count++
+    }
+    END {
+      for (replica in replica_primary) {
+        primary = replica_primary[replica]
+        if (!(primary in primaries)) {
+          valid = 0
+        } else {
+          replicas_per_primary[primary]++
+        }
+      }
+      for (primary in primaries) {
+        if (replicas_per_primary[primary] != 1) {
+          valid = 0
+        }
+      }
+      exit !(valid && node_count == 6 && primary_count == 3 && replica_count == 3)
+    }
+  '
+}
+
 # shellcheck source=../ci/cleanroom/common.sh
 source "$REPO_ROOT/ci/cleanroom/common.sh"
 
@@ -86,22 +142,36 @@ kubectl wait --namespace "$NAMESPACE" \
   pod \
   --timeout 10m
 
+redis_pod="$(kubectl get pods --namespace "$NAMESPACE" \
+  --selector "redis_cluster_name=$REDIS_CLUSTER_NAME" \
+  --field-selector status.phase=Running \
+  --output jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.deletionTimestamp}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+  | awk -F'|' '$2 == "" && $3 == "True" {print $1; exit}')"
+
+[[ -n "$redis_pod" ]] || cleanroom_die "could not find a current Ready Redis pod"
+
 topology_deadline=$((SECONDS + 600))
+topology_ready=false
 while ((SECONDS < topology_deadline)); do
-  cluster_info="$(kubectl exec --namespace "$NAMESPACE" "$REDIS_CLUSTER_NAME-0" \
+  cluster_info="$(kubectl exec --namespace "$NAMESPACE" "$redis_pod" \
     --container redis -- redis-cli --raw CLUSTER INFO 2>/dev/null | tr -d '\r' || true)"
+  cluster_nodes="$(kubectl exec --namespace "$NAMESPACE" "$redis_pod" \
+    --container redis -- redis-cli --raw CLUSTER NODES 2>/dev/null | tr -d '\r' || true)"
   cluster_state="$(awk -F: '$1 == "cluster_state" {print $2}' <<<"$cluster_info")"
   assigned_slots="$(awk -F: '$1 == "cluster_slots_assigned" {print $2}' <<<"$cluster_info")"
   known_nodes="$(awk -F: '$1 == "cluster_known_nodes" {print $2}' <<<"$cluster_info")"
   cluster_size="$(awk -F: '$1 == "cluster_size" {print $2}' <<<"$cluster_info")"
-  if [[ "$cluster_state" == ok && "$assigned_slots" == 16384 && "$known_nodes" == 6 && "$cluster_size" == 3 ]]; then
+  if [[ "$cluster_state" == ok && "$assigned_slots" == 16384 && "$known_nodes" == 6 && "$cluster_size" == 3 ]] \
+    && redis_topology_is_ready <<<"$cluster_nodes"; then
+    topology_ready=true
     break
   fi
   sleep 2
 done
 
-if [[ "${cluster_state:-}" != ok || "${assigned_slots:-}" != 16384 || "${known_nodes:-}" != 6 || "${cluster_size:-}" != 3 ]]; then
+if [[ "$topology_ready" != true ]]; then
   kubectl get pods --namespace "$NAMESPACE" --output wide >&2 || true
+  printf '%s\n' "${cluster_nodes:-}" >&2
   cleanroom_die "Redis topology did not become ready within 10 minutes"
 fi
 
@@ -113,11 +183,12 @@ Use this dedicated kubeconfig:
 
 Inspect the workload:
   kubectl get rediscluster,pods,pvc -n $NAMESPACE
-  kubectl exec -n $NAMESPACE $REDIS_CLUSTER_NAME-0 -c redis -- redis-cli --raw CLUSTER INFO
+  kubectl exec -n $NAMESPACE $redis_pod -c redis -- redis-cli --raw CLUSTER INFO
+  kubectl exec -n $NAMESPACE $redis_pod -c redis -- redis-cli --raw CLUSTER NODES
 
 Write and read through Redis Cluster redirection:
-  kubectl exec -n $NAMESPACE $REDIS_CLUSTER_NAME-0 -c redis -- redis-cli -c SET hello world
-  kubectl exec -n $NAMESPACE $REDIS_CLUSTER_NAME-0 -c redis -- redis-cli -c GET hello
+  kubectl exec -n $NAMESPACE $redis_pod -c redis -- redis-cli -c SET hello world
+  kubectl exec -n $NAMESPACE $redis_pod -c redis -- redis-cli -c GET hello
 
 Follow operator logs:
   kubectl logs -n $NAMESPACE -l app.kubernetes.io/component=operator --all-containers=true -f
