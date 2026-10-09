@@ -149,7 +149,7 @@ func (r *RedisClusterReconciler) reconcile(ctx context.Context, req ctrl.Request
 		if errors.IsNotFound(err) {
 			r.Log.Info("RedisCluster resource not found, ignoring (object must be deleted)")
 			r.notFoundCache.Store(req.NamespacedName.String(), time.Now())
-			return ctrl.Result{}, health.OK, nil
+			return ctrl.Result{}, health.Unknown, nil
 		}
 		r.Log.Error(err, "Failed to get the RedisCluster resource")
 		_ = r.Metrics.CountBadSituation("could_not_get_cluster")

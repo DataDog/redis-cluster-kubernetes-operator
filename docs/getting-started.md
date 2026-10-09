@@ -63,20 +63,26 @@ Run `redis-cli` inside a Redis pod. The `-c` option follows Redis Cluster
 `MOVED` and `ASK` redirects:
 
 ```sh
-kubectl exec -n redis-cluster-example cache-0 -c redis -- \
+REDIS_POD="$(kubectl get pods -n redis-cluster-example \
+  -l redis_cluster_name=cache \
+  --field-selector status.phase=Running \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.deletionTimestamp}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+  | awk -F'|' '$2 == "" && $3 == "True" {print $1; exit}')"
+
+kubectl exec -n redis-cluster-example "$REDIS_POD" -c redis -- \
   redis-cli -c SET hello world
 
-kubectl exec -n redis-cluster-example cache-0 -c redis -- \
+kubectl exec -n redis-cluster-example "$REDIS_POD" -c redis -- \
   redis-cli -c GET hello
 ```
 
 Inspect the topology:
 
 ```sh
-kubectl exec -n redis-cluster-example cache-0 -c redis -- \
+kubectl exec -n redis-cluster-example "$REDIS_POD" -c redis -- \
   redis-cli --raw CLUSTER INFO
 
-kubectl exec -n redis-cluster-example cache-0 -c redis -- \
+kubectl exec -n redis-cluster-example "$REDIS_POD" -c redis -- \
   redis-cli --raw CLUSTER NODES
 ```
 
@@ -93,12 +99,12 @@ First inspect `CLUSTER NODES` to see which ordinals are primaries and replicas.
 Then delete one pod and watch it return:
 
 ```sh
-kubectl delete pod -n redis-cluster-example cache-0
+kubectl delete pod -n redis-cluster-example "$REDIS_POD"
 kubectl get pods -n redis-cluster-example -w
 ```
 
-Verify the key and topology again after the replacement becomes ready. Follow
-the operator while testing:
+After the replacement becomes ready, run the `REDIS_POD` discovery command
+again before verifying the key and topology. Follow the operator while testing:
 
 ```sh
 kubectl logs -n redis-cluster-example \
@@ -155,7 +161,7 @@ CPU, memory, and disk:
 
 ```sh
 kubectl get events -n redis-cluster-example --sort-by=.lastTimestamp
-kubectl describe pod -n redis-cluster-example cache-0
+kubectl describe pods -n redis-cluster-example -l redis_cluster_name=cache
 ```
 
 Reset only the dedicated local environment with `make local-down`, then run

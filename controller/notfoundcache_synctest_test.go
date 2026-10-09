@@ -8,6 +8,7 @@ import (
 
 	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/constants"
+	"github.com/DataDog/redis-cluster-kubernetes-operator/health"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/metrics"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/redis_cluster"
 	"github.com/go-logr/logr"
@@ -75,13 +76,14 @@ func TestReconcileAcceptsRedisClusterNameWithoutLegacyPrefix(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	counting := &countingClient{Client: fakeClient}
+	sharedHealth := &healthPreservingMetrics{lastHealth: health.Error}
 	r := &RedisClustersReconciler{
 		ClusterClient: redis_cluster.ClusterClient{
 			Client:        counting,
 			ClusterScheme: scheme,
 			Namespace:     "default",
 			Log:           logr.Discard(),
-			Metrics:       &metrics.NoopMetrics{},
+			Metrics:       sharedHealth,
 		},
 	}
 	req := ctrl.Request{NamespacedName: types.NamespacedName{
@@ -94,6 +96,22 @@ func TestReconcileAcceptsRedisClusterNameWithoutLegacyPrefix(t *testing.T) {
 	require.Equal(t, 1, counting.getCalls, "every RedisCluster name must reach reconciliation")
 	_, cached := r.notFoundCache.Load(req.NamespacedName.String())
 	require.True(t, cached, "a non-prefixed missing CR must follow the normal NotFound path")
+	require.Equal(t, health.Error, sharedHealth.lastHealth,
+		"a missing CR must not overwrite the shared operator health")
+}
+
+type healthPreservingMetrics struct {
+	metrics.NoopMetrics
+	lastHealth health.ClusterHealth
+}
+
+func (m *healthPreservingMetrics) WithRedisCluster(string) metrics.Metrics { return m }
+
+func (m *healthPreservingMetrics) ReportHealth(h health.ClusterHealth) error {
+	if h != health.Unknown {
+		m.lastHealth = h
+	}
+	return nil
 }
 
 // countingClient counts Get calls — the cache short-circuit is upstream of Get.
