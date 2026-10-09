@@ -68,6 +68,34 @@ func TestSynctest_NotFoundCache_NoTightLoop(t *testing.T) {
 	})
 }
 
+func TestReconcileAcceptsRedisClusterNameWithoutLegacyPrefix(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, cachev1.SchemeBuilder.AddToScheme(scheme))
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	counting := &countingClient{Client: fakeClient}
+	r := &RedisClustersReconciler{
+		ClusterClient: redis_cluster.ClusterClient{
+			Client:        counting,
+			ClusterScheme: scheme,
+			Namespace:     "default",
+			Log:           logr.Discard(),
+			Metrics:       &metrics.NoopMetrics{},
+		},
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: "default",
+		Name:      "cache",
+	}}
+
+	_, err := r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, 1, counting.getCalls, "every RedisCluster name must reach reconciliation")
+	_, cached := r.notFoundCache.Load(req.NamespacedName.String())
+	require.True(t, cached, "a non-prefixed missing CR must follow the normal NotFound path")
+}
+
 // countingClient counts Get calls — the cache short-circuit is upstream of Get.
 type countingClient struct {
 	client.Client
