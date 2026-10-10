@@ -12,7 +12,7 @@ This inventory records internal-only material removed during the standalone repo
 | Deployment automation metadata | 2 | Contained private rollout, placement, and release automation. |
 | Internal Helm lint values | 1 | Modeled private CNAB and platform-specific chart inputs. |
 | Internal incident report | 1 | Contained production incident and infrastructure details. |
-| Internal CODEOWNERS entry | 1 | Named an internal repository ownership group. |
+| Repository-specific CODEOWNERS entry | 1 | Replaced with the public repository ownership rule. |
 | **Total** | **183** | |
 
 Compatibility identifiers such as the `cache.datadoghq.com/v1` API group/version and the existing leader-election ID were retained because they are public compatibility contracts, not private operational material.

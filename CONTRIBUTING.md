@@ -19,6 +19,7 @@ go vet ./...
 helm lint .
 helm template redis-cluster-kubernetes-operator . --namespace redis-operator
 make verify-crd-contract
+make verify-license-inventory
 ```
 
 Changes affecting the CRD should also run `make verify-crd-contract` and a

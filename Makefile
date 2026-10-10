@@ -3,7 +3,7 @@ CRD_CONTRACT_SHA256 := a166835578f125ed2ada86b9affaa367d285f59db1fc84e980095e9a6
 BUILD_DIR ?= bin
 BINARY ?= $(BUILD_DIR)/redis-cluster-kubernetes-operator
 
-.PHONY: build generate generate-deepcopy verify-crd-contract local-up local-down cleanroom-smoke
+.PHONY: build generate generate-deepcopy verify-crd-contract verify-license-inventory local-up local-down cleanroom-smoke
 
 build:
 	mkdir -p "$(BUILD_DIR)"
@@ -30,3 +30,6 @@ local-down:
 
 cleanroom-smoke:
 	./ci/run-cleanroom.sh kind smoke
+
+verify-license-inventory:
+	ci/verify-license-inventory.sh

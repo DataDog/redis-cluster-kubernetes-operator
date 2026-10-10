@@ -70,8 +70,15 @@ func TestBackupContainerSelection(t *testing.T) {
 func TestBackupPathsDistinguishLatestAndPrevious(t *testing.T) {
 	r := &RedisClusterReconciler{}
 	c := &redis_cluster.Cluster{RedisCluster: &cachev1.RedisCluster{}, StatefulSet: &appsv1.StatefulSet{}}
+	c.RedisCluster.Namespace = "cache-team"
 	c.RedisCluster.Name = "rco-test"
-	assert.NotEqual(t, r.latestBackupPath(c), r.previousBackupPath(c))
+	assert.Equal(t, "cache-team/rco-test/latest", r.latestBackupPath(c))
+	assert.Equal(t, "cache-team/rco-test/previous", r.previousBackupPath(c))
+	assert.Equal(t, "cache-team/rco-test/in-progress", r.inProgressBackupPath(c))
+
+	otherNamespace := &redis_cluster.Cluster{RedisCluster: c.RedisCluster.DeepCopy(), StatefulSet: &appsv1.StatefulSet{}}
+	otherNamespace.RedisCluster.Namespace = "other-team"
+	assert.NotEqual(t, r.latestBackupPath(c), r.latestBackupPath(otherNamespace))
 }
 
 type promotionStore struct {
