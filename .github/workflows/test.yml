@@ -31,6 +31,8 @@ jobs:
         run: ci/cleanroom/test-collect-artifacts.sh
       - name: Verify EKS cleanup behavior
         run: ci/cleanroom/cleanup-eks_test.sh
+      - name: Verify third-party license inventory
+        run: make verify-license-inventory
       - run: go test ./...
 
   chart-validation:
