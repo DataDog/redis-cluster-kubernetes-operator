@@ -48,6 +48,11 @@ reapplies the example, and waits for all 16,384 slots and the expected six
 Redis nodes. If you changed the example topology, use `make local-down` first
 to reset its retained topology state.
 
+The helper records ownership under `.local/` when it creates the cluster. It
+refuses to reuse or delete a same-name cluster created outside this checkout.
+Set `LOCAL_KIND_CLUSTER` to another name instead of adopting an existing
+cluster.
+
 The expected resources are:
 
 ```sh

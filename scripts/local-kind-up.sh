@@ -11,6 +11,7 @@ readonly IMAGE_REPOSITORY="redis-cluster-kubernetes-operator"
 readonly IMAGE_TAG="${LOCAL_IMAGE_TAG:-dev-$(date -u +%Y%m%d%H%M%S)}"
 readonly OPERATOR_IMAGE="$IMAGE_REPOSITORY:$IMAGE_TAG"
 readonly KUBECONFIG_PATH="${LOCAL_KUBECONFIG:-$REPO_ROOT/.local/kubeconfig}"
+readonly OWNERSHIP_PATH="${LOCAL_KIND_OWNERSHIP_FILE:-$REPO_ROOT/.local/kind-owner}"
 readonly REDIS_CLUSTER_NAME="cache"
 readonly EXPECTED_PODS=6
 
@@ -72,6 +73,8 @@ redis_topology_is_ready() {
 
 # shellcheck source=../ci/cleanroom/common.sh
 source "$REPO_ROOT/ci/cleanroom/common.sh"
+# shellcheck source=local-kind-ownership.sh
+source "$REPO_ROOT/scripts/local-kind-ownership.sh"
 
 cleanroom_require_commands docker go helm kind kubectl
 cleanroom_require_kind_version 0 30 0
@@ -101,7 +104,13 @@ KIND_CONFIG
     --image "$KIND_NODE_IMAGE" \
     --config "$kind_config" \
     --kubeconfig "$KUBECONFIG_PATH"
+  if ! local_kind_record_ownership "$CLUSTER_NAME" "$OWNERSHIP_PATH"; then
+    kind delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
+    cleanroom_die "could not record ownership of KIND cluster '$CLUSTER_NAME'"
+  fi
 else
+  local_kind_is_owned "$CLUSTER_NAME" "$OWNERSHIP_PATH" || cleanroom_die \
+    "refusing to reuse unowned KIND cluster '$CLUSTER_NAME'; choose another LOCAL_KIND_CLUSTER"
   kind export kubeconfig --name "$CLUSTER_NAME" --kubeconfig "$KUBECONFIG_PATH"
 fi
 
