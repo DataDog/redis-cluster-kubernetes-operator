@@ -167,7 +167,7 @@ func (r *RedisClusterReconciler) backup(ctx context.Context, cluster *redis_clus
 
 	latestPath := r.latestBackupPath(cluster)
 	previousPath := r.previousBackupPath(cluster)
-	inProgressPath := fmt.Sprintf("%s/in-progress", cluster.RedisCluster.Name)
+	inProgressPath := r.inProgressBackupPath(cluster)
 
 	// Upload to a temporary in-progress prefix first; promote to latest only when complete
 	// (below), so a partial backup can never overwrite the last good one (which the restore
@@ -401,12 +401,20 @@ func (r *RedisClusterReconciler) writeBackupManifest(cluster *redis_cluster.Clus
 	return nil
 }
 
+func (r *RedisClusterReconciler) backupRootPath(cluster *redis_cluster.Cluster) string {
+	return fmt.Sprintf("%s/%s", cluster.RedisCluster.Namespace, cluster.RedisCluster.Name)
+}
+
 func (r *RedisClusterReconciler) latestBackupPath(cluster *redis_cluster.Cluster) string {
-	return fmt.Sprintf("%s/latest", cluster.RedisCluster.Name)
+	return fmt.Sprintf("%s/latest", r.backupRootPath(cluster))
 }
 
 func (r *RedisClusterReconciler) previousBackupPath(cluster *redis_cluster.Cluster) string {
-	return fmt.Sprintf("%s/previous", cluster.RedisCluster.Name)
+	return fmt.Sprintf("%s/previous", r.backupRootPath(cluster))
+}
+
+func (r *RedisClusterReconciler) inProgressBackupPath(cluster *redis_cluster.Cluster) string {
+	return fmt.Sprintf("%s/in-progress", r.backupRootPath(cluster))
 }
 
 func (r *RedisClusterReconciler) readBackupManifest(cluster *redis_cluster.Cluster, backupPath string) (*BackupManifest, error) {
