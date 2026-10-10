@@ -18,6 +18,7 @@ readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-cleanroom-kind.XXXXXX")"
 readonly KUBECONFIG_PATH="$TEMP_DIR/kubeconfig"
 readonly RESOURCE_STATE="$TEMP_DIR/resource-state"
 readonly ARTIFACT_DIR="${CLEANROOM_ARTIFACT_DIR:-$REPO_ROOT/cleanroom-artifacts/$RUN_ID}"
+cluster_owned=false
 
 # shellcheck source=common.sh
 source "$REPO_ROOT/ci/cleanroom/common.sh"
@@ -32,7 +33,7 @@ cleanup() {
       echo "WARNING: failure artifact collection did not complete" >&2
     echo "Clean-room failure artifacts: $ARTIFACT_DIR" >&2
   fi
-  if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"; then
+  if [[ "$cluster_owned" == true ]] && command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"; then
     kind delete cluster --name "$CLUSTER_NAME" || cleanup_status=$?
   fi
   rm -f "$KUBECONFIG_PATH" "$TEMP_DIR/kind.yaml" "$RESOURCE_STATE"
@@ -53,6 +54,10 @@ cleanroom_require_kind_version 0 30 0
 if kind get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"; then
   cleanroom_die "refusing to reuse existing KIND cluster '$CLUSTER_NAME'"
 fi
+
+# From this point on, any cluster with this name was created by this run. Set
+# ownership before creation so a partially created cluster is also cleaned up.
+cluster_owned=true
 
 cat >"$TEMP_DIR/kind.yaml" <<KIND_CONFIG
 kind: Cluster
