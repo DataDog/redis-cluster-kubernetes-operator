@@ -133,6 +133,7 @@ go test ./...
 go vet ./...
 helm lint . --strict --kube-version 1.33.0
 helm template redis-cluster-kubernetes-operator . --namespace redis-operator --kube-version 1.33.0
+make verify-license-inventory
 ```
 
 ## Clean-room qualification
@@ -179,4 +180,4 @@ STS, and resource-tagging permissions used by the runner and cleanup audit.
 
 Qualification reports configured workload and operation totals only. It makes no achieved-QPS, latency, or maximum-outage claim.
 
-See `CONTRIBUTING.md` and `SECURITY.md` before proposing changes. The project is licensed under Apache-2.0; third-party production dependencies are listed in `LICENSE-3rdparty.csv`.
+See `CONTRIBUTING.md` and `SECURITY.md` before proposing changes. The project is licensed under Apache-2.0; third-party Go module dependencies used by repository packages are listed in `LICENSE-3rdparty.csv`.

@@ -18,6 +18,7 @@ go test ./...
 go vet ./...
 helm lint .
 helm template redis-cluster-kubernetes-operator . --namespace redis-operator
+make verify-license-inventory
 ```
 
 Changes affecting the CRD should also run the contract checker and a clean-cluster installation test. Backup, authentication, toolbox, and command-execution changes require security review.
