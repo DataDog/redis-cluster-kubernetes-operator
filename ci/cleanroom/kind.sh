@@ -55,10 +55,6 @@ if kind get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"; then
   cleanroom_die "refusing to reuse existing KIND cluster '$CLUSTER_NAME'"
 fi
 
-# From this point on, any cluster with this name was created by this run. Set
-# ownership before creation so a partially created cluster is also cleaned up.
-cluster_owned=true
-
 cat >"$TEMP_DIR/kind.yaml" <<KIND_CONFIG
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -74,6 +70,8 @@ kind create cluster \
   --image "$KIND_NODE_IMAGE" \
   --config "$TEMP_DIR/kind.yaml" \
   --kubeconfig "$KUBECONFIG_PATH"
+# A failed create can lose a same-name race, so claim ownership only on success.
+cluster_owned=true
 
 export KUBECONFIG="$KUBECONFIG_PATH"
 cleanroom_verify_context "$KUBECONFIG_PATH" "$CONTEXT"
