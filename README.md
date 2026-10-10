@@ -10,7 +10,7 @@ The Redis operators we evaluated did not provide the same combination of Kuberne
 
 - Redis Cluster creation, topology reconciliation, failover, and safe handling of terminating pods.
 - Namespace-scoped installation and ordinary Kubernetes Service DNS by default.
-- Optional Secret-backed Redis ACL authentication without placing credentials in process arguments, URLs, logs, or ConfigMaps.
+- Optional Secret-backed Redis ACL authentication without placing the password in process arguments, URLs, logs, or ConfigMaps.
 - Prometheus metrics and independent controller-runtime health endpoints.
 - Provider-neutral autoscaling and lifecycle interfaces. No external provider is enabled by the public startup path.
 - S3, Google Cloud Storage, and Azure Blob backup contracts with versioned, hashed manifests.
@@ -71,9 +71,12 @@ See `examples/README.md` for its PVC-backed `nodes.conf` layout. Backups are dis
 
 The public startup supports either no authentication (the default) or a
 same-namespace Secret. Configure Redis itself with the same ACL user, then
-create the Secret and reference its keys. The following example reads the
-values without putting either credential in a process argument or a committed
-file; `jq` passes the generated manifest to `kubectl` over standard input:
+create the Secret and reference its keys. Redis ACL usernames are identifiers,
+not secret values; the helper passes the username to `redis-cli --user` and
+supplies only the password through `REDISCLI_AUTH`. The following example reads
+the values without putting the password in a process argument or either value
+in a committed file; `jq` passes the generated manifest to `kubectl` over
+standard input:
 
 ```sh
 read -r -p 'Redis ACL username: ' REDIS_USERNAME
@@ -98,7 +101,7 @@ helm upgrade --install redis-cluster-kubernetes-operator . \
   --set operator.redisAuth.passwordKey=password
 ```
 
-The Secret is mounted only into the toolbox. A fixed helper reads it inside the pod; credentials are not sent in exec arguments.
+The Secret is mounted only into the toolbox. A fixed helper reads it inside the pod; the password is not sent in exec arguments.
 
 ## Metrics and health
 
@@ -126,6 +129,12 @@ Backups are beta and must remain disabled unless all prerequisites are supplied:
 - Complete the required security review of toolbox, authentication, backup artifact integrity, and credential handling.
 
 Successful backups rotate exactly two generations: the new complete backup is promoted to `latest`, and the former `latest` becomes `previous`. Restore tries `latest` first and can fall back to `previous`. `spec.backupRetention` is a deprecated compatibility field: it is unsupported and ignored, so it does not change the fixed current-plus-previous retention behavior.
+
+Object prefixes use `<namespace>/<RedisCluster name>/<generation>` so releases
+in different namespaces cannot overwrite each other's backups. Backups created
+by prerelease builds under the old name-only prefix are not discovered
+automatically; set `spec.restoreFrom` to that exact legacy prefix for a one-time
+restore, then let the operator write subsequent backups to the namespaced path.
 
 Backup manifests are versioned and artifacts carry size and SHA-256 metadata; malformed or mismatched data fails closed. The manifest authentication decision (signature or MAC) is not frozen and remains a security-review gate.
 
@@ -162,6 +171,7 @@ go test ./...
 go vet ./...
 helm lint . --strict --kube-version 1.33.0
 helm template redis-cluster-kubernetes-operator . --namespace redis-operator --kube-version 1.33.0
+make verify-license-inventory
 ```
 
 ## Clean-room qualification
@@ -208,4 +218,4 @@ STS, and resource-tagging permissions used by the runner and cleanup audit.
 
 Qualification reports configured workload and operation totals only. It makes no achieved-QPS, latency, or maximum-outage claim.
 
-See `CONTRIBUTING.md` and `SECURITY.md` before proposing changes. The project is licensed under Apache-2.0; third-party production dependencies are listed in `LICENSE-3rdparty.csv`.
+See `CONTRIBUTING.md` and `SECURITY.md` before proposing changes. The project is licensed under Apache-2.0; third-party Go module dependencies used by repository packages are listed in `LICENSE-3rdparty.csv`.
