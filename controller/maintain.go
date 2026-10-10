@@ -1211,12 +1211,16 @@ func (r *RedisClusterReconciler) detectAndFixPartitionedNodes(ctx context.Contex
 		"refNodePod", refNode.PodName,
 		"refNodeKnownNodes", refNode.Info.KnownNodes)
 
+	attemptCount := 0
+	var lastMeetErr error
 	meetNode := func(node *redis_cluster.ClusterNode) bool {
+		attemptCount++
 		log.Info("CLUSTER MEET to repair connectivity",
 			"podName", node.PodName, "ip", node.IP,
 			"knownNodes", node.Info.KnownNodes, "views", len(node.Views),
 			"refPod", refNode.PodName, "refIP", refNode.IP)
 		if err := cluster.Toolbox.Meet(refNode.IP, node.IP, cluster.RedisPort); err != nil {
+			lastMeetErr = err
 			log.Error(err, "Failed to MEET node", "podName", node.PodName)
 			return false
 		}
@@ -1261,7 +1265,10 @@ func (r *RedisClusterReconciler) detectAndFixPartitionedNodes(ctx context.Contex
 	if err != nil {
 		return cluster, err
 	}
-	return refreshed, fmt.Errorf("%w: attempted for %d node(s)", errConnectivityRepairPending, len(orphanedNodes)+len(splitNodes))
+	if attemptCount > 0 && meetCount == 0 {
+		return refreshed, fmt.Errorf("connectivity repair failed for all %d attempted node(s): %w", attemptCount, lastMeetErr)
+	}
+	return refreshed, fmt.Errorf("%w: repaired %d of %d attempted node(s)", errConnectivityRepairPending, meetCount, attemptCount)
 }
 
 // addPrimaries adds missing primaries from outsider nodes, and refreshes the cluster.
