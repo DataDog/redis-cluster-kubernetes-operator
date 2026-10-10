@@ -31,6 +31,7 @@ github.com/pmezard/go-difflib,https://pkg.go.dev/github.com/pmezard/go-difflib@v
 github.com/prometheus/client_golang,https://pkg.go.dev/github.com/prometheus/client_golang@v1.22.0?tab=licenses,Apache-2.0,
 github.com/prometheus/client_model,https://pkg.go.dev/github.com/prometheus/client_model@v0.6.1?tab=licenses,Apache-2.0,
 github.com/prometheus/common,https://pkg.go.dev/github.com/prometheus/common@v0.62.0?tab=licenses,Apache-2.0,
+github.com/prometheus/procfs,https://pkg.go.dev/github.com/prometheus/procfs@v0.15.1?tab=licenses,Apache-2.0,Copyright The Prometheus Authors
 github.com/redis/rueidis,https://pkg.go.dev/github.com/redis/rueidis@v1.0.77?tab=licenses,Apache-2.0,
 github.com/spf13/pflag,https://pkg.go.dev/github.com/spf13/pflag@v1.0.5?tab=licenses,BSD-3-Clause,
 github.com/stretchr/testify,https://pkg.go.dev/github.com/stretchr/testify@v1.11.1?tab=licenses,MIT,"Copyright (c) 2012-2020 Mat Ryer, Tyler Bunnell and contributors."

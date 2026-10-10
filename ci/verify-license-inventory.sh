@@ -9,7 +9,8 @@ expected="$(mktemp "${TMPDIR:-/tmp}/redis-operator-license-modules.XXXXXX")"
 trap 'rm -f "$expected"' EXIT
 
 cd "$REPO_ROOT"
-go list -deps -f '{{with .Module}}{{if .Version}}{{.Path}}|{{.Version}}{{end}}{{end}}' ./... \
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+  go list -deps -f '{{with .Module}}{{if .Version}}{{.Path}}|{{.Version}}{{end}}{{end}}' ./... \
   | sort -u >"$expected"
 
 python3 - "$INVENTORY" "$expected" <<'PY'
