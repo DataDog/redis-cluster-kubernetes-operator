@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+auth_dir=/var/run/redis-operator/auth
+username=$(cat "$auth_dir/username")
+REDISCLI_AUTH=$(cat "$auth_dir/password")
+
+if [ -z "$username" ] || [ -z "$REDISCLI_AUTH" ]; then
+  echo "Redis credential files must not be empty" >&2
+  exit 64
+fi
+
+export REDISCLI_AUTH
+exec redis-cli --user "$username" --no-auth-warning "$@"

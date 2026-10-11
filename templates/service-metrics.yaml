@@ -1,0 +1,22 @@
+{{- if and .Values.operator.metrics.enabled .Values.operator.metrics.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "redis-cluster-kubernetes-operator.metricsFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redis-cluster-kubernetes-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+  {{- with .Values.operator.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    {{- include "redis-cluster-kubernetes-operator.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.operator.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

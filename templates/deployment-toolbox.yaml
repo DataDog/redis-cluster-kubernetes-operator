@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "redis-cluster-kubernetes-operator.toolboxFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redis-cluster-kubernetes-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: toolbox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "redis-cluster-kubernetes-operator.toolboxSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "redis-cluster-kubernetes-operator.toolboxSelectorLabels" . | nindent 8 }}
+        # Compatibility selectors used by the existing controller contract.
+        app: managed-redis-cluster-operator-toolbox
+        service: managed-redis-cluster-operator-toolbox
+        {{- with .Values.toolbox.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.toolbox.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "redis-cluster-kubernetes-operator.toolboxServiceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: managed-redis-cluster-operator-toolbox
+          image: {{ printf "%s:%s" .Values.toolbox.image.repository .Values.toolbox.image.tag | quote }}
+          imagePullPolicy: {{ .Values.toolbox.image.pullPolicy }}
+          command: ["sleep"]
+          args: ["infinity"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+          resources:
+            {{- toYaml .Values.toolbox.resources | nindent 12 }}
+          {{- if .Values.operator.redisAuth.secretName }}
+          volumeMounts:
+            - name: redis-auth-helper
+              mountPath: /usr/local/bin/redis-operator-redis-cli
+              subPath: redis-operator-redis-cli
+              readOnly: true
+            - name: redis-auth
+              mountPath: /var/run/redis-operator/auth
+              readOnly: true
+          {{- end }}
+      {{- if .Values.operator.redisAuth.secretName }}
+      volumes:
+        - name: redis-auth-helper
+          configMap:
+            name: {{ include "redis-cluster-kubernetes-operator.redisAuthHelperName" . }}
+            defaultMode: 0555
+        - name: redis-auth
+          secret:
+            secretName: {{ .Values.operator.redisAuth.secretName | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ required "operator.redisAuth.usernameKey is required when secretName is set" .Values.operator.redisAuth.usernameKey | quote }}
+                path: username
+              - key: {{ required "operator.redisAuth.passwordKey is required when secretName is set" .Values.operator.redisAuth.passwordKey | quote }}
+                path: password
+      {{- end }}

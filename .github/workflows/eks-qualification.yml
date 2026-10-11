@@ -1,0 +1,127 @@
+name: EKS qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: AWS region with at least three available zones
+        required: true
+        default: us-east-2
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: redis-operator-eks-cleanroom
+  cancel-in-progress: false
+
+env:
+  CLEANROOM_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
+  CLEANROOM_AWS_ACCOUNT_ID: ${{ vars.CLEANROOM_AWS_ACCOUNT_ID }}
+  CLEANROOM_AWS_REGION: ${{ inputs.aws_region }}
+  CLEANROOM_IMAGE_REVISION: ${{ github.sha }}
+  CLEANROOM_RESOURCE_STATE: ${{ github.workspace }}/cleanroom-artifacts/gh-${{ github.run_id }}-${{ github.run_attempt }}/resource-state
+  CLEANROOM_ARTIFACT_DIR: ${{ github.workspace }}/cleanroom-artifacts/gh-${{ github.run_id }}-${{ github.run_attempt }}
+  EKSCTL_VERSION: v0.215.0
+  EKSCTL_SHA256: 8d17b7709c0109cb7477d681fb112e9a19dc91e4b4aacb881c2c3fad734c6683
+  KUBECTL_VERSION: v1.33.1
+  KUBECTL_SHA256: 5de4e9f2266738fd112b721265a0c1cd7f4e5208b670f811861f699474a100a3
+
+jobs:
+  qualify:
+    name: Redis operator portability on EKS 1.33
+    environment: cleanroom-eks
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install artifact scanner
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ripgrep
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.CLEANROOM_AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+      - name: Validate required AWS configuration
+        env:
+          ROLE_ARN: ${{ secrets.CLEANROOM_AWS_ROLE_ARN }}
+        run: |
+          test -n "$ROLE_ARN" || { echo "CLEANROOM_AWS_ROLE_ARN is not configured" >&2; exit 1; }
+          [[ "$CLEANROOM_AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || {
+            echo "CLEANROOM_AWS_ACCOUNT_ID must be configured as a 12-digit repository variable" >&2
+            exit 1
+          }
+      - name: Install pinned Kubernetes tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSLo "$RUNNER_TEMP/eksctl.tar.gz" \
+            "https://github.com/eksctl-io/eksctl/releases/download/${EKSCTL_VERSION}/eksctl_Linux_amd64.tar.gz"
+          echo "$EKSCTL_SHA256  $RUNNER_TEMP/eksctl.tar.gz" | sha256sum --check --status
+          tar -xzf "$RUNNER_TEMP/eksctl.tar.gz" -C "$RUNNER_TEMP/bin" eksctl
+          curl -fsSLo "$RUNNER_TEMP/bin/kubectl" \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "$KUBECTL_SHA256  $RUNNER_TEMP/bin/kubectl" | sha256sum --check --status
+          chmod 0755 "$RUNNER_TEMP/bin/eksctl" "$RUNNER_TEMP/bin/kubectl"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Run EKS portability qualification
+        env:
+          CLEANROOM_TEST_TIMEOUT: 120m
+        run: |
+          mkdir -p "$CLEANROOM_ARTIFACT_DIR"
+          ci/run-cleanroom.sh eks portability
+      - name: Scan failure artifacts before upload
+        if: failure()
+        id: scan
+        run: ci/cleanroom/verify-artifacts.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure() && steps.scan.outputs.safe == 'true'
+        with:
+          name: cleanroom-eks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: cleanroom-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  cleanup:
+    name: Independent EKS cleanup audit
+    if: always()
+    needs: qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.CLEANROOM_AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+      - name: Install pinned eksctl
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSLo "$RUNNER_TEMP/eksctl.tar.gz" \
+            "https://github.com/eksctl-io/eksctl/releases/download/${EKSCTL_VERSION}/eksctl_Linux_amd64.tar.gz"
+          echo "$EKSCTL_SHA256  $RUNNER_TEMP/eksctl.tar.gz" | sha256sum --check --status
+          tar -xzf "$RUNNER_TEMP/eksctl.tar.gz" -C "$RUNNER_TEMP/bin" eksctl
+          chmod 0755 "$RUNNER_TEMP/bin/eksctl"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Reconstruct exact run state and clean up
+        run: |
+          [[ "$CLEANROOM_AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || {
+            echo "CLEANROOM_AWS_ACCOUNT_ID must be configured as a 12-digit repository variable" >&2
+            exit 1
+          }
+          state="$RUNNER_TEMP/cleanroom-resource-state"
+          {
+            echo "run_id=$CLEANROOM_RUN_ID"
+            echo "aws_account_id=$CLEANROOM_AWS_ACCOUNT_ID"
+            echo "aws_region=$CLEANROOM_AWS_REGION"
+            echo "cluster_name=redis-op-$CLEANROOM_RUN_ID"
+            echo "ecr_repository=redis-op-cleanroom-$CLEANROOM_RUN_ID"
+            echo "owner_tag_key=redis-cluster-kubernetes-operator-cleanroom"
+            echo "owner_tag_value=$CLEANROOM_RUN_ID"
+          } > "$state"
+          ci/cleanroom/cleanup-eks.sh "$state"
