@@ -10,12 +10,31 @@ The Redis operators we evaluated did not provide the same combination of Kuberne
 
 - Redis Cluster creation, topology reconciliation, failover, and safe handling of terminating pods.
 - Namespace-scoped installation and ordinary Kubernetes Service DNS by default.
-- Optional Secret-backed Redis ACL authentication without placing credentials in process arguments, URLs, logs, or ConfigMaps.
+- Optional Secret-backed Redis ACL authentication without placing the password in process arguments, URLs, logs, or ConfigMaps.
 - Prometheus metrics and independent controller-runtime health endpoints.
 - Provider-neutral autoscaling and lifecycle interfaces. No external provider is enabled by the public startup path.
 - S3, Google Cloud Storage, and Azure Blob backup contracts with versioned, hashed manifests.
 
 The API remains `cache.datadoghq.com/v1`, including its existing JSON fields, and the leader-election identity remains unchanged for compatibility.
+
+## Local quick start
+
+On macOS, start a Docker runtime with Colima, then create the local development
+cluster:
+
+```sh
+colima start --cpu 4 --memory 8 --disk 30
+go install sigs.k8s.io/kind@v0.30.0
+export PATH="$(go env GOPATH)/bin:$PATH"
+make local-up
+export KUBECONFIG="$PWD/.local/kubeconfig"
+```
+
+The command builds the current checkout, installs the chart into a dedicated
+one-node KIND cluster, applies the six-pod `cache` example, and waits for a
+healthy Redis topology. It never uses the current context from the default
+kubeconfig. See [`docs/getting-started.md`](docs/getting-started.md) for data,
+restart, log, qualification, and cleanup commands.
 
 ## Install
 
@@ -52,9 +71,12 @@ See `examples/README.md` for its PVC-backed `nodes.conf` layout. Backups are dis
 
 The public startup supports either no authentication (the default) or a
 same-namespace Secret. Configure Redis itself with the same ACL user, then
-create the Secret and reference its keys. The following example reads the
-values without putting either credential in a process argument or a committed
-file; `jq` passes the generated manifest to `kubectl` over standard input:
+create the Secret and reference its keys. Redis ACL usernames are identifiers,
+not secret values; the helper passes the username to `redis-cli --user` and
+supplies only the password through `REDISCLI_AUTH`. The following example reads
+the values without putting the password in a process argument or either value
+in a committed file; `jq` passes the generated manifest to `kubectl` over
+standard input:
 
 ```sh
 read -r -p 'Redis ACL username: ' REDIS_USERNAME
@@ -79,7 +101,7 @@ helm upgrade --install redis-cluster-kubernetes-operator . \
   --set operator.redisAuth.passwordKey=password
 ```
 
-The Secret is mounted only into the toolbox. A fixed helper reads it inside the pod; credentials are not sent in exec arguments.
+The Secret is mounted only into the toolbox. A fixed helper reads it inside the pod; the password is not sent in exec arguments.
 
 ## Metrics and health
 
@@ -108,6 +130,12 @@ Backups are beta and must remain disabled unless all prerequisites are supplied:
 
 Successful backups rotate exactly two generations: the new complete backup is promoted to `latest`, and the former `latest` becomes `previous`. Restore tries `latest` first and can fall back to `previous`. `spec.backupRetention` is a deprecated compatibility field: it is unsupported and ignored, so it does not change the fixed current-plus-previous retention behavior.
 
+Object prefixes use `<namespace>/<RedisCluster name>/<generation>` so releases
+in different namespaces cannot overwrite each other's backups. Backups created
+by prerelease builds under the old name-only prefix are not discovered
+automatically; set `spec.restoreFrom` to that exact legacy prefix for a one-time
+restore, then let the operator write subsequent backups to the namespaced path.
+
 Backup manifests are versioned and artifacts carry size and SHA-256 metadata; malformed or mismatched data fails closed. The manifest authentication decision (signature or MAC) is not frozen and remains a security-review gate.
 
 Backup validation currently consists of unit and in-process integration
@@ -124,7 +152,17 @@ portability.
 - Blue-green rollout qualification covers image changes. Resource-only pod template changes are not currently included in the rollout hash.
 - Backup deployment is not provided by the reference workload and requires the prerequisites above.
 - The Phase 1 toolbox remains present. Its Redis operations are typed, but removal of the toolbox is future work.
-- The CRD is cluster-scoped while each controller watches one namespace. Coordinate CRD lifecycle when installing multiple releases.
+- `RedisCluster` resources are namespaced. The CRD definition is cluster-wide and shared by all releases, so coordinate CRD upgrades when installing multiple namespace-scoped controllers.
+
+## Documentation
+
+- [Local quick start](docs/getting-started.md)
+- [Redis workload contract](docs/workload-contract.md)
+- [Operations guide](docs/operations.md)
+- [RedisCluster API reference](docs/api-reference.md)
+- [Example workload](examples/README.md)
+- [Deployed-operator clean-room tests](test/blackbox/README.md)
+- [In-process KIND tests](e2e/README.md)
 
 ## Development
 
@@ -133,6 +171,7 @@ go test ./...
 go vet ./...
 helm lint . --strict --kube-version 1.33.0
 helm template redis-cluster-kubernetes-operator . --namespace redis-operator --kube-version 1.33.0
+make verify-license-inventory
 ```
 
 ## Clean-room qualification
@@ -143,7 +182,7 @@ chart, and reconciles Redis 8.6 through the packaged operator Deployment. It
 does not use dd-source, an internal chart, a private registry, or a
 pre-existing operator installation.
 
-Local prerequisites are Docker, Go, KIND, `kubectl`, and Helm 3. From the repository root, the complete smoke path is one command:
+Local prerequisites are Docker, Go, KIND v0.30.0 or newer, `kubectl`, and Helm 3. Install the same KIND version used by CI with `go install sigs.k8s.io/kind@v0.30.0`. From the repository root, the complete smoke path is one command:
 
 ```sh
 ci/run-cleanroom.sh kind smoke
@@ -179,4 +218,4 @@ STS, and resource-tagging permissions used by the runner and cleanup audit.
 
 Qualification reports configured workload and operation totals only. It makes no achieved-QPS, latency, or maximum-outage claim.
 
-See `CONTRIBUTING.md` and `SECURITY.md` before proposing changes. The project is licensed under Apache-2.0; third-party production dependencies are listed in `LICENSE-3rdparty.csv`.
+See `CONTRIBUTING.md` and `SECURITY.md` before proposing changes. The project is licensed under Apache-2.0; third-party Go module dependencies used by repository packages are listed in `LICENSE-3rdparty.csv`.

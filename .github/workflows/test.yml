@@ -29,8 +29,16 @@ jobs:
         run: ci/cleanroom/test-verify-artifacts.sh
       - name: Verify bounded artifact collection
         run: ci/cleanroom/test-collect-artifacts.sh
+      - name: Verify KIND version guard
+        run: bash ci/cleanroom/test-kind-version.sh
+      - name: Verify KIND cluster ownership
+        run: bash ci/cleanroom/test-kind-ownership.sh
+      - name: Verify local KIND cluster ownership
+        run: bash scripts/test-local-kind-ownership.sh
       - name: Verify EKS cleanup behavior
         run: ci/cleanroom/cleanup-eks_test.sh
+      - name: Verify third-party license inventory
+        run: make verify-license-inventory
       - run: go test ./...
 
   chart-validation:

@@ -53,10 +53,10 @@ func TestE2E_ScaleUp_ReshardDistribution(t *testing.T) {
 	s.RequireStringData(t, "reshard-data", dataIntegrityKeyCount, dataReadRetry)
 }
 
-// TestE2E_ScaleDown_DataIntegrity scales primaries up then back down and asserts
-// no blue-green is used, all keys survive, and topology re-converges.
-func TestE2E_ScaleDown_DataIntegrity(t *testing.T) {
-	requireSlow(t, "slow: full scale-up then scale-down + slot-drain convergence (~3 min)")
+// TestE2E_PrimaryDownscaleRetainsTarget scales primaries up, lowers the
+// configured minimum, and asserts the retained target and data remain intact.
+func TestE2E_PrimaryDownscaleRetainsTarget(t *testing.T) {
+	requireSlow(t, "slow: scale-up then retained-target verification (~3 min)")
 	s := newCluster(t)
 	s.WriteStringData(t, "scale-data", dataIntegrityKeyCount, dataReadRetry)
 
@@ -67,11 +67,9 @@ func TestE2E_ScaleDown_DataIntegrity(t *testing.T) {
 
 	s.PatchPrimaries(t, clusterName, redisbuilder.DefaultPrimaries)
 	require.NoError(t, s.WaitReady(clusterObjectKey(s), scaleConvergeTimeout))
-	s.RequireTopology(t, clusterName, redisbuilder.DefaultPrimaries, redisbuilder.DefaultReplicas, scaleConvergeTimeout)
+	s.RequireTopology(t, clusterName, scaleTargetPrimaries, redisbuilder.DefaultReplicas, scaleConvergeTimeout)
 	s.RequireIdle(t, clusterName)
 
-	// Wait for the down-reshard to re-serve every slot before reading keys back
-	// (slots migrate off the removed primary asynchronously).
 	s.RequireSlotCoverage(t, clusterName, topologySettleTimeout)
 	s.RequireReplicasPointToPrimaries(t, clusterName, topologySettleTimeout)
 	s.RequireStringData(t, "scale-data", dataIntegrityKeyCount, dataReadRetry)

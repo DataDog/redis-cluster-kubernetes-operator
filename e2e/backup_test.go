@@ -24,9 +24,11 @@ const (
 
 // TestE2E_Backup_RotatePreviousBackup_RealS3 runs the operator's S3 backup path
 // against an in-namespace MinIO and asserts the rotation layout: after two
-// backups, both <name>/latest and <name>/previous prefixes exist in the bucket.
+// backups, both <namespace>/<name>/latest and <namespace>/<name>/previous
+// prefixes exist in the bucket.
 func TestE2E_Backup_RotatePreviousBackup_RealS3(t *testing.T) {
 	s := rckind.NewSuite(t)
+	backupRoot := s.Namespace + "/" + clusterName
 	deployMinIO(t, s, backupBucket)
 	// BACKUP_BUCKET is set process-wide in TestMain (before the shared operator
 	// starts) to avoid the t.Setenv-vs-shared-operator race.
@@ -48,22 +50,22 @@ func TestE2E_Backup_RotatePreviousBackup_RealS3(t *testing.T) {
 	waitForBackupAfter(t, s, first)
 
 	s.EventuallyT(t, "latest backup prefix exists", clusterReadyTimeout, func() bool {
-		return s3PrefixExists(t, s, clusterName+"/latest")
+		return s3PrefixExists(t, s, backupRoot+"/latest")
 	})
 	s.EventuallyT(t, "previous backup prefix exists", clusterReadyTimeout, func() bool {
-		return s3PrefixExists(t, s, clusterName+"/previous")
+		return s3PrefixExists(t, s, backupRoot+"/previous")
 	})
 
 	backupNodeCount := s.GetCluster(t, clusterName).Status.LastBackupNodeCount
 	require.Positive(t, backupNodeCount)
 	for _, generation := range []string{"latest", "previous"} {
-		prefix := clusterName + "/" + generation
+		prefix := backupRoot + "/" + generation
 		keys, ok := s3PrefixKeys(t, s, prefix)
 		require.True(t, ok, "failed to list %s", prefix)
 		require.ElementsMatch(t, expectedBackupKeys(prefix, backupNodeCount), keys,
 			"%s must contain direct per-node objects without a nested in-progress directory", prefix)
 	}
-	inProgressKeys, ok := s3PrefixKeys(t, s, clusterName+"/in-progress")
+	inProgressKeys, ok := s3PrefixKeys(t, s, backupRoot+"/in-progress")
 	require.True(t, ok, "failed to list in-progress prefix")
 	require.Empty(t, inProgressKeys, "completed promotion must remove the standalone in-progress backup")
 }
@@ -76,7 +78,7 @@ func waitForBackupAfter(t *testing.T, s *rckind.Suite, previous int64) int64 {
 	s.EventuallyT(t, "backup completed", clusterReadyTimeout, func() bool {
 		rc := s.GetCluster(t, clusterName)
 		seen = rc.Status.LastBackupTime
-		return seen > previous && rc.Status.LastBackupPath == clusterName+"/latest"
+		return seen > previous && rc.Status.LastBackupPath == s.Namespace+"/"+clusterName+"/latest"
 	})
 	return seen
 }
@@ -143,7 +145,7 @@ func TestE2E_BackupRestore(t *testing.T) {
 
 	s.WriteStringData(t, restoreDataPrefix, dataIntegrityKeyCount, dataReadRetry)
 	// Two backup cycles so a BGSAVE that began strictly after the seed (capturing
-	// every key) lands in <name>/latest, not one that was mid-flight during it.
+	// every key) lands in <namespace>/<name>/latest, not one that was mid-flight during it.
 	b1 := waitForBackupAfter(t, s, s.GetCluster(t, clusterName).Status.LastBackupTime)
 	waitForBackupAfter(t, s, b1)
 
@@ -157,7 +159,7 @@ func TestE2E_BackupRestore(t *testing.T) {
 		redisbuilder.WithReplicas(0),
 		rckind.WithAppendOnly(false),
 		rckind.WithS3BackupSidecar(awsCliImage(), minIOEndpoint(), minIOAccessKey, minIOSecretKey),
-		redisbuilder.WithRestoreFrom(clusterName+"/latest"),
+		redisbuilder.WithRestoreFrom(s.Namespace+"/"+clusterName+"/latest"),
 	)
 	s.CreateCluster(t, dst, clusterReadyTimeout)
 
