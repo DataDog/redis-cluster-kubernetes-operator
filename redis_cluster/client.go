@@ -24,7 +24,7 @@ import (
 )
 
 var (
-	podListLabelNames = []string{"app", "chart_name", "redis_cluster_name"}
+	requiredPodListLabelNames = []string{"app", "redis_cluster_name"}
 )
 
 const redisServiceNameEnv = "REDIS_SERVICE_NAME"
@@ -330,12 +330,17 @@ func (cc *ClusterClient) testStatefulSetPods(ctx context.Context, redisCluster *
 // getPodListLabels gets the list of StatefulSet labels key/vals to use for listing the StatefulSet pods.
 func getPodListLabels(labels map[string]string) (map[string]string, error) {
 	filtered := make(map[string]string)
-	for _, key := range podListLabelNames {
+	for _, key := range requiredPodListLabelNames {
 		if v, ok := labels[key]; ok {
 			filtered[key] = v
 		} else {
 			return nil, fmt.Errorf("label key (%s) was not found", key)
 		}
+	}
+	// chart_name narrows legacy pod queries when it survives CRD persistence,
+	// but embedded ObjectMeta fields can be pruned by the API server.
+	if chartName, ok := labels["chart_name"]; ok {
+		filtered["chart_name"] = chartName
 	}
 	return filtered, nil
 }
@@ -363,9 +368,12 @@ func (cc *ClusterClient) getPods(ctx context.Context, namespace string, clusterN
 
 // GetRedisClusterPods gets the pods owned by the StatefulSet.
 func (cc *ClusterClient) GetRedisClusterPods(ctx context.Context, redisCluster *cachev1.RedisCluster) (*corev1.PodList, error) {
-	labels := redisCluster.Spec.StatefulsetTemplate.Labels
+	labels := maps.Clone(redisCluster.Spec.StatefulsetTemplate.Labels)
+	if labels == nil {
+		labels = make(map[string]string)
+	}
 	if redisCluster.Spec.StatefulsetTemplate.Spec.Selector != nil {
-		labels = redisCluster.Spec.StatefulsetTemplate.Spec.Selector.MatchLabels
+		maps.Copy(labels, redisCluster.Spec.StatefulsetTemplate.Spec.Selector.MatchLabels)
 	}
 	return cc.getPods(ctx, redisCluster.Namespace, redisCluster.Name, labels)
 }
