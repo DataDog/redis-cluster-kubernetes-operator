@@ -152,7 +152,9 @@ portability.
 - The repository does not publish an image or chart during Phase 1.
 - No autoscaling recommendation provider or provider-specific lifecycle adapter is enabled by public startup.
 - Primary downscale is not supported in the initial public release. Lowering `spec.primaries` does not lower the retained effective target or remove Redis pods.
-- Blue-green rollout qualification covers image changes. Resource-only pod template changes are not currently included in the rollout hash.
+- Blue-green rollout qualification covers image changes. Other pod-template
+  changes are detected and trigger the same rollout path, but do not yet have
+  dedicated deployed-operator qualification scenarios.
 - Backup deployment is not provided by the reference workload and requires the prerequisites above.
 - The Phase 1 toolbox remains present. Its Redis operations are typed, but removal of the toolbox is future work.
 - `RedisCluster` resources are namespaced. The CRD definition is cluster-wide and shared by all releases, so coordinate CRD upgrades when installing multiple namespace-scoped controllers.
