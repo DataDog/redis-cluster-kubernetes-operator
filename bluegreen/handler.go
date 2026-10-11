@@ -349,7 +349,7 @@ func (h *Handler) Start(ctx context.Context, cluster *redis_cluster.Cluster) (ct
 			allIPs = append(allIPs, n.IP)
 		}
 	}
-	h.setReplicaMigration(cluster.Toolbox, allIPs, false)
+	h.setReplicaMigration(ctx, cluster.Toolbox, allIPs, false)
 
 	cluster.RedisCluster.Status.BlueGreen = cachev1.BlueGreenStatus{
 		Phase:     cachev1.BlueGreenPhaseCreatingGreen,
@@ -587,7 +587,7 @@ func (h *Handler) bgSetupReplication(ctx context.Context, cluster *redis_cluster
 				return ctrl.Result{}, health.Error, utils.WrapErr(err,
 					fmt.Sprintf("failed to add green pod %s as replica of blue primary %s", greenPod.Name, bluePrimary.PodName))
 			}
-			h.setReplicaMigration(cluster.Toolbox, []string{greenPod.Status.PodIP}, false)
+			h.setReplicaMigration(ctx, cluster.Toolbox, []string{greenPod.Status.PodIP}, false)
 
 			greenNodeID, err = cluster.Toolbox.GetNodeIDByIP(greenPod.Status.PodIP)
 			if err != nil {
@@ -1371,7 +1371,7 @@ func (h *Handler) bgScaleDownBlue(ctx context.Context, cluster *redis_cluster.Cl
 		// Safety gate: green must cover all slots before blue is deleted.
 		// Post-FORGET green's slot count excludes blue, so a gap means data loss.
 		if bgStatus.BlueNodesForgotten {
-			if greenSlots := h.countGreenOnlySlots(cluster.Toolbox, bgStatus); greenSlots < 0 {
+			if greenSlots := h.countGreenOnlySlots(ctx, cluster.Toolbox, bgStatus); greenSlots < 0 {
 				_ = h.metrics.CountBadSituation("bluegreen_pre_delete_slot_gap")
 				return ctrl.Result{}, health.Error, fmt.Errorf(
 					"aborting blue delete: unable to determine green-only slot coverage (no green node responded to CLUSTER INFO)")
@@ -1398,7 +1398,7 @@ func (h *Handler) bgScaleDownBlue(ctx context.Context, cluster *redis_cluster.Cl
 				bgStatus.DrainStartedAt = time.Now().Unix()
 				_ = h.deps.UpdateStatus(ctx, cluster.RedisCluster)
 			}
-			converged, stillPresentOn := h.forgetConverged(cluster.Toolbox, greenPrimaryIPs, bgStatus.BlueNodeIDsToForget)
+			converged, stillPresentOn := h.forgetConverged(ctx, cluster.Toolbox, greenPrimaryIPs, bgStatus.BlueNodeIDsToForget)
 			if !converged {
 				elapsed := time.Since(time.Unix(bgStatus.DrainStartedAt, 0))
 				if elapsed < constants.BlueGreenForgetConvergenceTimeout {
@@ -1760,6 +1760,7 @@ func (h *Handler) bgCleanupFailed(ctx context.Context, cluster *redis_cluster.Cl
 	unreachableCount := 0
 	for _, mapping := range bgStatus.ShardMapping {
 		if mapping.GreenPodIP == "" {
+			unreachableCount++
 			continue
 		}
 		info, err := cluster.Toolbox.GetReplicationInfo(mapping.GreenPodIP)
@@ -1807,11 +1808,11 @@ func (h *Handler) bgCleanupFailed(ctx context.Context, cluster *redis_cluster.Cl
 		}
 	}
 
-	if unreachableCount > 0 && unreachableCount == len(bgStatus.ShardMapping) {
-		h.log.Error(nil, "All green pods unreachable — cannot determine slot ownership, refusing to rollback",
+	if unreachableCount > 0 {
+		h.log.Error(nil, "Green pod ownership is unknown — refusing to rollback",
 			"unreachable", unreachableCount)
 		return ctrl.Result{RequeueAfter: constants.DefaultSleepTime}, health.Error,
-			fmt.Errorf("all %d green pods unreachable, manual intervention required", unreachableCount)
+			fmt.Errorf("%d green pods have unknown ownership, manual intervention required", unreachableCount)
 	}
 
 	h.log.Info("No green primaries detected — safe to rollback")

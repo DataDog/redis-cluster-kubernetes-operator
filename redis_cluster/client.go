@@ -525,6 +525,12 @@ func (cc *ClusterClient) GetBlueOnlyCluster(ctx context.Context, redisCluster *c
 // - After BG completes, pods keep their owner reference
 func (cc *ClusterClient) CreateGreenStatefulSet(ctx context.Context, redisCluster *cachev1.RedisCluster) (*appsv1.StatefulSet, string, error) {
 	greenSTS := redisCluster.Spec.StatefulsetTemplate.DeepCopy()
+	if greenSTS.Labels == nil {
+		greenSTS.Labels = make(map[string]string)
+	}
+	if chartVersion, ok := redisCluster.Labels["chart_version"]; ok {
+		greenSTS.Labels["chart_version"] = chartVersion
+	}
 	if err := restorePrunedVolumeClaimTemplateName(greenSTS); err != nil {
 		return nil, "", err
 	}

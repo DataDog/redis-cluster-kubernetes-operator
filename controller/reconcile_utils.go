@@ -572,6 +572,7 @@ func (r *RedisClusterReconciler) refreshCluster(ctx context.Context, cluster *re
 		_ = r.Metrics.CountBadSituation("could_not_get_cluster")
 		return nil, utils.WrapErr(err, "failed to refresh cluster")
 	}
+	restorePrunedStatefulSetMetadata(redisCluster)
 
 	// ensure the StatefulSet is still ready
 	statefulSetIsReady := redisCluster.Status.StatefulSetReady

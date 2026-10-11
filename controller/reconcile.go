@@ -20,9 +20,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -539,6 +542,34 @@ func (r *RedisClustersReconciler) addAutoscalingProviderWatches(mgr ctrl.Manager
 	return controllerBuilder, nil
 }
 
+func (r *RedisClustersReconciler) mapPodToRedisCluster(ctx context.Context, object client.Object) []ctrl.Request {
+	statefulSetOwner := metav1.GetControllerOf(object)
+	if statefulSetOwner == nil || statefulSetOwner.APIVersion != appsv1.SchemeGroupVersion.String() || statefulSetOwner.Kind != "StatefulSet" {
+		return nil
+	}
+
+	statefulSet := &appsv1.StatefulSet{}
+	key := types.NamespacedName{Namespace: object.GetNamespace(), Name: statefulSetOwner.Name}
+	if err := r.Get(ctx, key, statefulSet); err != nil {
+		if !errors.IsNotFound(err) {
+			r.Log.Error(err, "Failed to resolve Pod owner", "pod", object.GetName(), "statefulSet", key)
+		}
+		return nil
+	}
+	if statefulSetOwner.UID != "" && statefulSet.UID != statefulSetOwner.UID {
+		return nil
+	}
+
+	redisClusterOwner := metav1.GetControllerOf(statefulSet)
+	if redisClusterOwner == nil || redisClusterOwner.APIVersion != cachev1.GroupVersion.String() || redisClusterOwner.Kind != "RedisCluster" {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{
+		Namespace: object.GetNamespace(),
+		Name:      redisClusterOwner.Name,
+	}}}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *RedisClustersReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
@@ -570,14 +601,15 @@ func (r *RedisClustersReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// watch(source, handler)
 		// - source = pod, trigger when a pod event triggers
 		// - handler = what will be triggered
-		// whenever a pod change, enqueue a (reconcile) request for the owner of the pod = the statefulset
+		// Whenever a Pod changes, resolve its StatefulSet controller and enqueue
+		// the RedisCluster that controls that StatefulSet.
 		//
 		// Intentionally unfiltered: DeletionTimestamp transitions must trigger
 		// reconcile so handleTerminatingPods can react before grace expires.
 		// Adding a metadata-filter predicate here would break that contract.
 		Watches(
 			&corev1.Pod{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &appsv1.StatefulSet{}, handler.OnlyControllerOwner()),
+			handler.EnqueueRequestsFromMapFunc(r.mapPodToRedisCluster),
 		).
 
 		// Cap exponential backoff to prevent long stalls after transient errors
