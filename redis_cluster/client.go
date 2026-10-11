@@ -84,6 +84,9 @@ func (cc *ClusterClient) GetOrCreateStatefulSet(ctx context.Context, redisCluste
 		cc.Log.Error(err, "Failed to get the StatefulSet resource")
 		return nil, utils.WrapErr(err, "failed to get the StatefulSet resource")
 	}
+	if err := ensureControlledByRedisCluster(sts, redisCluster); err != nil {
+		return nil, err
+	}
 	cc.Log.Info("Got the StatefulSet resource")
 	return sts, nil
 }
@@ -98,6 +101,9 @@ func (cc *ClusterClient) GetStatefulSet(ctx context.Context, redisCluster *cache
 	if err := cc.Get(ctx, nsn, sts); err != nil {
 		cc.Log.Error(err, "Failed to get the StatefulSet resource")
 		return nil, utils.WrapErr(err, "failed to get the StatefulSet resource")
+	}
+	if err := ensureControlledByRedisCluster(sts, redisCluster); err != nil {
+		return nil, err
 	}
 	cc.Log.Info("Got the StatefulSet resource")
 	return sts, nil
@@ -533,6 +539,12 @@ func (cc *ClusterClient) GetBlueOnlyCluster(ctx context.Context, redisCluster *c
 // - After BG completes, pods keep their owner reference
 func (cc *ClusterClient) CreateGreenStatefulSet(ctx context.Context, redisCluster *cachev1.RedisCluster) (*appsv1.StatefulSet, string, error) {
 	greenSTS := redisCluster.Spec.StatefulsetTemplate.DeepCopy()
+	if greenSTS.Labels == nil {
+		greenSTS.Labels = make(map[string]string)
+	}
+	if chartVersion, ok := redisCluster.Labels["chart_version"]; ok {
+		greenSTS.Labels["chart_version"] = chartVersion
+	}
 	if err := restorePrunedVolumeClaimTemplateName(greenSTS); err != nil {
 		return nil, "", err
 	}
@@ -597,6 +609,9 @@ func (cc *ClusterClient) CreateGreenStatefulSet(ctx context.Context, redisCluste
 			existing := &appsv1.StatefulSet{}
 			if getErr := cc.Get(ctx, types.NamespacedName{Name: greenName, Namespace: redisCluster.Namespace}, existing); getErr != nil {
 				return nil, greenName, utils.WrapErr(getErr, "failed to get existing green StatefulSet")
+			}
+			if err := ensureControlledByRedisCluster(existing, redisCluster); err != nil {
+				return nil, greenName, err
 			}
 			if existing.Spec.Replicas != nil && *existing.Spec.Replicas == 0 {
 				cc.Log.Info("Stale green STS has 0 replicas, deleting for clean start", "name", greenName)
@@ -664,6 +679,9 @@ func (cc *ClusterClient) CreateGreenHeadlessService(ctx context.Context, redisCl
 			if getErr := cc.Get(ctx, types.NamespacedName{Name: peerServiceName, Namespace: redisCluster.Namespace}, existing); getErr != nil {
 				return utils.WrapErr(getErr, "failed to get existing green headless service")
 			}
+			if err := ensureControlledByRedisCluster(existing, redisCluster); err != nil {
+				return err
+			}
 			if !maps.Equal(existing.Spec.Selector, greenSvc.Spec.Selector) {
 				existing.Spec.Selector = maps.Clone(greenSvc.Spec.Selector)
 				if updateErr := cc.Update(ctx, existing); updateErr != nil {
@@ -683,10 +701,13 @@ func (cc *ClusterClient) CreateGreenHeadlessService(ctx context.Context, redisCl
 }
 
 // GetGreenStatefulSet gets the green StatefulSet by name.
-func (cc *ClusterClient) GetGreenStatefulSet(ctx context.Context, namespace string, greenSTSName string) (*appsv1.StatefulSet, error) {
+func (cc *ClusterClient) GetGreenStatefulSet(ctx context.Context, redisCluster *cachev1.RedisCluster, greenSTSName string) (*appsv1.StatefulSet, error) {
 	sts := &appsv1.StatefulSet{}
-	if err := cc.Get(ctx, types.NamespacedName{Name: greenSTSName, Namespace: namespace}, sts); err != nil {
+	if err := cc.Get(ctx, types.NamespacedName{Name: greenSTSName, Namespace: redisCluster.Namespace}, sts); err != nil {
 		return nil, utils.WrapErr(err, "failed to get green StatefulSet")
+	}
+	if err := ensureControlledByRedisCluster(sts, redisCluster); err != nil {
+		return nil, err
 	}
 	return sts, nil
 }
@@ -731,14 +752,18 @@ func (cc *ClusterClient) GetActivePods(ctx context.Context, namespace string) ([
 }
 
 // DeleteGreenResources deletes the green StatefulSet and headless service (cleanup/rollback).
-func (cc *ClusterClient) DeleteGreenResources(ctx context.Context, namespace string, greenSTSName string) error {
+func (cc *ClusterClient) DeleteGreenResources(ctx context.Context, redisCluster *cachev1.RedisCluster, greenSTSName string) error {
+	namespace := redisCluster.Namespace
+	ownedStatefulSet := false
 	// Delete green StatefulSet
 	sts := &appsv1.StatefulSet{}
 	if err := cc.Get(ctx, types.NamespacedName{Name: greenSTSName, Namespace: namespace}, sts); err == nil {
-		cc.Log.Info("Deleting green StatefulSet", "name", greenSTSName)
-		if err := cc.Delete(ctx, sts); err != nil && !errors.IsNotFound(err) {
-			return utils.WrapErr(err, "failed to delete green StatefulSet")
+		if err := ensureControlledByRedisCluster(sts, redisCluster); err != nil {
+			return err
 		}
+		ownedStatefulSet = true
+	} else if !errors.IsNotFound(err) {
+		return utils.WrapErr(err, "failed to get green StatefulSet before deletion")
 	}
 
 	// Delete green PVCs to prevent stale nodes.conf on next BG.
@@ -746,7 +771,10 @@ func (cc *ClusterClient) DeleteGreenResources(ctx context.Context, namespace str
 	// Use regex to avoid matching blue PVCs when names share a prefix
 	// (e.g. "redis-cluster-richa" vs "redis-cluster-richa-alt").
 	pvcList := &corev1.PersistentVolumeClaimList{}
-	if err := cc.List(ctx, pvcList, client.InNamespace(namespace)); err == nil {
+	if ownedStatefulSet {
+		if err := cc.List(ctx, pvcList, client.InNamespace(namespace)); err != nil {
+			return utils.WrapErr(err, "failed to list green PVCs")
+		}
 		greenPVCPattern, _ := regexp.Compile(`^data-` + regexp.QuoteMeta(greenSTSName) + `-\d`)
 		if greenPVCPattern != nil {
 			deleted := 0
@@ -754,10 +782,9 @@ func (cc *ClusterClient) DeleteGreenResources(ctx context.Context, namespace str
 				if greenPVCPattern.MatchString(pvcList.Items[i].Name) {
 					cc.Log.Info("Deleting green PVC during rollback", "pvc", pvcList.Items[i].Name)
 					if err := cc.Delete(ctx, &pvcList.Items[i]); err != nil && !errors.IsNotFound(err) {
-						cc.Log.Error(err, "Failed to delete green PVC (non-fatal)", "pvc", pvcList.Items[i].Name)
-					} else {
-						deleted++
+						return utils.WrapErr(err, "failed to delete green PVC before StatefulSet")
 					}
+					deleted++
 				}
 			}
 			if deleted > 0 {
@@ -766,21 +793,40 @@ func (cc *ClusterClient) DeleteGreenResources(ctx context.Context, namespace str
 		}
 	}
 
+	// Keep the owned StatefulSet as ownership evidence until every retained PVC
+	// has been accepted for deletion. A retry after a partial failure can then
+	// safely identify and clean the remaining green claims.
+	if ownedStatefulSet {
+		cc.Log.Info("Deleting green StatefulSet", "name", greenSTSName)
+		if err := cc.Delete(ctx, sts); err != nil && !errors.IsNotFound(err) {
+			return utils.WrapErr(err, "failed to delete green StatefulSet")
+		}
+	}
+
 	// Delete green headless service (only if operator-created, i.e. has ownerReferences)
 	svc := &corev1.Service{}
 	peerServiceName := BlueGreenPeerServiceName(greenSTSName)
 	if err := cc.Get(ctx, types.NamespacedName{Name: peerServiceName, Namespace: namespace}, svc); err == nil {
-		if len(svc.OwnerReferences) > 0 {
-			cc.Log.Info("Deleting green headless service (operator-owned)", "name", peerServiceName)
-			if err := cc.Delete(ctx, svc); err != nil && !errors.IsNotFound(err) {
-				return utils.WrapErr(err, "failed to delete green headless service")
-			}
-		} else {
-			cc.Log.Info("Skipping service deletion — no ownerReferences", "name", peerServiceName)
+		if err := ensureControlledByRedisCluster(svc, redisCluster); err != nil {
+			return err
 		}
+		cc.Log.Info("Deleting green headless service (operator-owned)", "name", peerServiceName)
+		if err := cc.Delete(ctx, svc); err != nil && !errors.IsNotFound(err) {
+			return utils.WrapErr(err, "failed to delete green headless service")
+		}
+	} else if !errors.IsNotFound(err) {
+		return utils.WrapErr(err, "failed to get green headless service before deletion")
 	}
 
 	return nil
+}
+
+func ensureControlledByRedisCluster(object metav1.Object, redisCluster *cachev1.RedisCluster) error {
+	if metav1.IsControlledBy(object, redisCluster) {
+		return nil
+	}
+	return fmt.Errorf("refusing to use %T %s/%s: resource is not controlled by RedisCluster %s/%s",
+		object, object.GetNamespace(), object.GetName(), redisCluster.Namespace, redisCluster.Name)
 }
 
 // DeleteStatefulSet deletes a StatefulSet by name.
@@ -846,8 +892,12 @@ func (cc *ClusterClient) getRedisPort(ctx context.Context, redisCluster *cachev1
 	redisPort := 6379
 	if found {
 		for _, port := range svc.Spec.Ports {
-			if port.Name == "redis-server" {
-				redisPort = int(port.Port)
+			if port.Name == "redis-server" || port.Name == "redis" {
+				resolvedPort, err := resolveRedisTargetPort(redisCluster, port)
+				if err != nil {
+					return 0, err
+				}
+				redisPort = resolvedPort
 				break
 			}
 		}
@@ -856,4 +906,26 @@ func (cc *ClusterClient) getRedisPort(ctx context.Context, redisCluster *cachev1
 	}
 
 	return redisPort, nil
+}
+
+func resolveRedisTargetPort(redisCluster *cachev1.RedisCluster, servicePort corev1.ServicePort) (int, error) {
+	if servicePort.TargetPort.IntVal > 0 {
+		return int(servicePort.TargetPort.IntVal), nil
+	}
+	if servicePort.TargetPort.StrVal == "" {
+		return int(servicePort.Port), nil
+	}
+
+	targetName := servicePort.TargetPort.StrVal
+	podSpec := redisCluster.Spec.StatefulsetTemplate.Spec.Template.Spec
+	for _, containers := range [][]corev1.Container{podSpec.InitContainers, podSpec.Containers} {
+		for _, container := range containers {
+			for _, containerPort := range container.Ports {
+				if containerPort.Name == targetName {
+					return int(containerPort.ContainerPort), nil
+				}
+			}
+		}
+	}
+	return 0, fmt.Errorf("Redis Service targetPort %q does not match a Pod container port", targetName)
 }

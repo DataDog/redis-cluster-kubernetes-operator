@@ -53,9 +53,11 @@ func TestSynctest_NotFoundCache_NoTightLoop(t *testing.T) {
 
 		// within TTL → no Get, timestamp unchanged
 		time.Sleep(time.Second)
-		_, err = r.Reconcile(context.Background(), req)
+		result, err := r.Reconcile(context.Background(), req)
 		require.NoError(t, err)
 		require.Equal(t, 1, counting.getCalls, "cache hit must skip Get")
+		require.Equal(t, constants.NotFoundCacheTTL-time.Second, result.RequeueAfter,
+			"a suppressed create event must be retried when the cache entry expires")
 		ts2 := loadNotFoundCacheTimestamp(t, r, req)
 		require.True(t, ts1.Equal(ts2))
 

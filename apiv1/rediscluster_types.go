@@ -11,10 +11,13 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // RedisClusterSpec defines the desired state of RedisCluster
+// +kubebuilder:validation:XValidation:rule="self.primaries * (1 + self.replicas) <= 2147483647",message="primaries and replicas produce too many pods"
 type RedisClusterSpec struct {
 	// Primaries is the number of primary nodes
+	// +kubebuilder:validation:Minimum=1
 	Primaries int32 `json:"primaries"`
 	// Replicas is the number of replicas each primary should have
+	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
 	// RestoreFrom is the path to a backup in cloud storage to seed this cluster, eg) redis-cluster-test/202012171413/
 	RestoreFrom string `json:"restoreFrom"`
@@ -221,6 +224,9 @@ type RedisClusterStatus struct {
 	LastBackupDurationMs  int64              `json:"last_backup_duration_ms,omitempty"`
 	LastBackupFailedNodes []int              `json:"last_backup_failed_nodes,omitempty"`
 	BackupRestored        bool               `json:"backup_restored"`
+	// RestorePath records the backup generation selected for the current restore
+	// so topology reconstruction uses the same generation across reconciles.
+	RestorePath string `json:"restore_path,omitempty"`
 	// RestoreTopologyPending limits manifest-guided slot reconstruction to the
 	// cluster formation immediately following a restore.
 	RestoreTopologyPending bool   `json:"restore_topology_pending,omitempty"`

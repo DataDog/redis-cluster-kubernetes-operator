@@ -6,6 +6,7 @@ import (
 	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/redis_cluster"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -247,6 +248,14 @@ func TestParseClusterNodesFrom_BackfillsOnlyMyselfIP(t *testing.T) {
 		SlotsRanges: "10923-16383",
 	}}
 	assert.True(t, clusterViewCoversMappings(byID, ipToID, mapping))
+}
+
+func TestParseClusterNodesSupportsIPv6(t *testing.T) {
+	byID, ipToID := parseClusterNodes("node-a [2001:db8::10]:6379@16379 master - 0 0 1 connected 0-16383")
+
+	require.Equal(t, "2001:db8::10", byID["node-a"].ip)
+	require.Equal(t, "node-a", ipToID["2001:db8::10"])
+	require.Equal(t, []redis_cluster.SlotsRange{{First: 0, Last: 16383}}, byID["node-a"].slots)
 }
 
 func TestCoversAll(t *testing.T) {

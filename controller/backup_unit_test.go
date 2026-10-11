@@ -3,9 +3,12 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
+	"github.com/DataDog/redis-cluster-kubernetes-operator/metrics"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/redis_cluster"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,6 +18,102 @@ import (
 
 func clusterWithSpec(spec cachev1.RedisClusterSpec) *redis_cluster.Cluster {
 	return &redis_cluster.Cluster{RedisCluster: &cachev1.RedisCluster{Spec: spec}}
+}
+
+func TestWaitForBackupPollStopsWhenReconciliationIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	err := waitForBackupPoll(ctx, time.Hour)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Less(t, time.Since(started), time.Second)
+}
+
+func TestRedisInfoString(t *testing.T) {
+	info := "# Server\r\nredis_version:8.6.0\r\nrun_id:abc123\r\n"
+	assert.Equal(t, "abc123", redisInfoString(info, "run_id"))
+	assert.Empty(t, redisInfoString(info, "missing"))
+}
+
+func TestRestoreStagedNodesRejectsMissingTargetArtifactBeforeMutation(t *testing.T) {
+	r := &RedisClusterReconciler{}
+	cluster := &redis_cluster.Cluster{Toolbox: &redis_cluster.Toolbox{}}
+	targets := []*redis_cluster.ClusterNode{
+		{PodName: "cache-0", PodIndex: 0},
+		{PodName: "cache-1", PodIndex: 1},
+	}
+	staged := map[stagedArtifactKey]stagedBackupArtifact{
+		{ordinal: 0, kind: backupArtifactRDB}: {},
+	}
+
+	err := r.restoreStagedNodes(context.Background(), cluster, "default/cache/latest", targets, staged)
+
+	require.EqualError(t, err, "manifest has no RDB artifact for restore target ordinal 1")
+}
+
+func TestPlanMappedRDBRestoreCarriesSourceArtifactToSelectedTarget(t *testing.T) {
+	target := &redis_cluster.ClusterNode{PodIndex: 3, PodName: "cache-3"}
+	manifest := &BackupManifest{Artifacts: []BackupArtifact{
+		{Ordinal: 0, Kind: backupArtifactRDB, ObjectKey: "0/dump.rdb", SHA256: "source-digest"},
+		{Ordinal: 3, Kind: backupArtifactRDB, ObjectKey: "3/dump.rdb", SHA256: "target-digest"},
+	}}
+
+	staged, err := planMappedRDBRestore(manifest, []restoreArtifactTarget{{
+		sourceOrdinal: 0,
+		target:        target,
+	}})
+
+	require.NoError(t, err)
+	entry, exists := staged[stagedArtifactKey{ordinal: 3, kind: backupArtifactRDB}]
+	require.True(t, exists)
+	assert.Equal(t, 0, entry.artifact.Ordinal)
+	assert.Equal(t, "0/dump.rdb", entry.artifact.ObjectKey)
+	assert.Same(t, target, entry.node)
+	assert.Equal(t, redis_cluster.BackupFileStagedDump, entry.file)
+}
+
+func TestPlanMappedRDBRestoreRejectsMissingSourceArtifact(t *testing.T) {
+	_, err := planMappedRDBRestore(&BackupManifest{}, []restoreArtifactTarget{{
+		sourceOrdinal: 2,
+		target:        &redis_cluster.ClusterNode{PodIndex: 3, PodName: "cache-3"},
+	}})
+	require.ErrorContains(t, err, "no RDB artifact for source ordinal 2")
+}
+
+func TestBlueGreenSafetyBackupRequiresWaitingSyncAndBypassesSchedule(t *testing.T) {
+	r := &RedisClusterReconciler{ClusterClient: redis_cluster.ClusterClient{Metrics: metrics.CreateNoop()}}
+	cluster := clusterWithSpec(cachev1.RedisClusterSpec{
+		BackupEnabled:   true,
+		BackupFrequency: 3600,
+	})
+	cluster.AllNodes = []*redis_cluster.ClusterNode{{PodIndex: 0, PodName: "cache-0", IP: "10.0.0.1"}}
+	cluster.RedisCluster.Status.LastBackupTime = time.Now().Unix()
+	cluster.RedisCluster.Status.BlueGreen.Phase = cachev1.BlueGreenPhasePromoting
+
+	_, err := r.backupForBlueGreen(context.Background(), cluster)
+	require.ErrorContains(t, err, "requires phase")
+
+	cluster.RedisCluster.Status.BlueGreen.Phase = cachev1.BlueGreenPhaseWaitingSync
+	_, err = r.backupForBlueGreen(context.Background(), cluster)
+	require.ErrorContains(t, err, "no backup bucket configured")
+}
+
+func TestBlueGreenBackupClusterExcludesGossipOnlyMembers(t *testing.T) {
+	blue := &redis_cluster.ClusterNode{PodIndex: 0, PodName: "cache-0", IP: "10.0.0.1"}
+	gossipOnly := &redis_cluster.ClusterNode{PodIndex: -1}
+	cluster := &redis_cluster.Cluster{AllNodes: []*redis_cluster.ClusterNode{blue, gossipOnly}}
+
+	backupCluster, err := blueGreenBackupCluster(cluster)
+
+	require.NoError(t, err)
+	require.Equal(t, []*redis_cluster.ClusterNode{blue}, backupCluster.AllNodes)
+	require.Len(t, cluster.AllNodes, 2, "filtering must not mutate the reconciliation topology")
+}
+
+func TestBlueGreenBackupClusterRequiresPodBackedNode(t *testing.T) {
+	_, err := blueGreenBackupCluster(&redis_cluster.Cluster{AllNodes: []*redis_cluster.ClusterNode{{PodIndex: -1}}})
+	require.ErrorContains(t, err, "no pod-backed blue nodes")
 }
 
 func TestBackupBucketIsNotSanitizedIntoAnotherResource(t *testing.T) {
@@ -79,6 +178,70 @@ func TestBackupPathsDistinguishLatestAndPrevious(t *testing.T) {
 	otherNamespace := &redis_cluster.Cluster{RedisCluster: c.RedisCluster.DeepCopy(), StatefulSet: &appsv1.StatefulSet{}}
 	otherNamespace.RedisCluster.Namespace = "other-team"
 	assert.NotEqual(t, r.latestBackupPath(c), r.latestBackupPath(otherNamespace))
+}
+
+func TestSelectBackupGenerationFallsBackBeforeRestoreMutation(t *testing.T) {
+	latestErr := errors.New("latest manifest is corrupt")
+	validated := make([]string, 0, 2)
+	selected, err := selectBackupGeneration(
+		[]string{"cache/latest", "cache/previous"},
+		func(string) (bool, error) { return true, nil },
+		func(path string) error {
+			validated = append(validated, path)
+			if path == "cache/latest" {
+				return latestErr
+			}
+			return nil
+		},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "cache/previous", selected)
+	assert.Equal(t, []string{"cache/latest", "cache/previous"}, validated)
+}
+
+func TestSelectBackupGenerationReturnsEmptyOnlyWhenBothAreAbsent(t *testing.T) {
+	selected, err := selectBackupGeneration(
+		[]string{"cache/latest", "cache/previous"},
+		func(string) (bool, error) { return false, nil },
+		func(string) error { t.Fatal("validate called for absent backup"); return nil },
+	)
+	require.NoError(t, err)
+	assert.Empty(t, selected)
+
+	_, err = selectBackupGeneration(
+		[]string{"cache/latest", "cache/previous"},
+		func(string) (bool, error) { return true, nil },
+		func(path string) error { return fmt.Errorf("%s corrupt", path) },
+	)
+	require.ErrorContains(t, err, "no valid backup generation")
+}
+
+func TestPlanBackupValidationDoesNotRequireHistoricalOrdinals(t *testing.T) {
+	nodes := []*redis_cluster.ClusterNode{
+		{PodName: "cache-0", PodIndex: 0},
+		{PodName: "cache-1", PodIndex: 1},
+	}
+	artifacts := []BackupArtifact{
+		{Ordinal: 0, Kind: backupArtifactRDB},
+		{Ordinal: 1, Kind: backupArtifactRDB},
+		{Ordinal: 6, Kind: backupArtifactRDB},
+		{Ordinal: 7, Kind: backupArtifactRDB},
+	}
+
+	assignments, err := planBackupValidation(nodes, artifacts)
+	require.NoError(t, err)
+	require.Len(t, assignments, 2)
+	assert.Equal(t, []int{0, 6}, []int{
+		assignments[0][0].artifact.Ordinal,
+		assignments[0][1].artifact.Ordinal,
+	})
+	assert.Equal(t, []int{1, 7}, []int{
+		assignments[1][0].artifact.Ordinal,
+		assignments[1][1].artifact.Ordinal,
+	})
+	assert.Same(t, nodes[0], assignments[0][1].node)
+	assert.Same(t, nodes[1], assignments[1][1].node)
 }
 
 type promotionStore struct {

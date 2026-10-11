@@ -117,6 +117,32 @@ func TestParseNodeLineCapturesAnnouncedHostname(t *testing.T) {
 	)
 }
 
+func TestParseNodeLineCapturesIPv6Address(t *testing.T) {
+	node := &ClusterNode{
+		PodName:  "redis-cluster-test-0",
+		PodIndex: 0,
+		IP:       "2001:db8::10",
+		Views:    make(map[int]*NodeView),
+	}
+	nodes := []*ClusterNode{node}
+
+	nodes = parseNodeLine(nodes, node,
+		"81b2 [2001:db8::10]:6379@16379,redis-0.redis.default.svc myself,master - 0 0 10 connected 0-16383",
+		logr.Discard())
+
+	require.Len(t, nodes, 1)
+	assert.Equal(t, "81b2", node.ID)
+	assert.Equal(t, "redis-0.redis.default.svc", node.Hostname)
+	assert.Equal(t, []SlotsRange{{First: 0, Last: 16383}}, node.SlotsRanges)
+}
+
+func TestParseClusterNodeAddressAcceptsUnbracketedIPv6(t *testing.T) {
+	host, hostname, ok := ParseClusterNodeAddress("2001:db8::10:6379@16379,redis-0.redis.default.svc")
+	require.True(t, ok)
+	assert.Equal(t, "2001:db8::10", host)
+	assert.Equal(t, "redis-0.redis.default.svc", hostname)
+}
+
 func TestParseNodeLineCapturesOpenSlotsInPeerView(t *testing.T) {
 	viewer := &ClusterNode{
 		PodName:  "redis-cluster-test-0",

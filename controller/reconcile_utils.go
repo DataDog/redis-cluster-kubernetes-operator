@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -57,7 +59,17 @@ func (r *RedisClusterReconciler) detectSpecChanges(ctx context.Context, cluster 
 		// Migrate from the legacy full-spec hash using what is actually running.
 		// Initializing from the desired CR would hide a simultaneous scale + image
 		// or config change because scaling only updates StatefulSet replicas.
-		currentHash = computeRolloutSpecHashForTemplate(cluster.StatefulSet.Spec.Template)
+		if rolloutTemplateMatchesLive(
+			rolloutTemplateForCluster(cluster),
+			cluster.StatefulSet.Spec.Template,
+		) {
+			// API servers fill omitted Pod defaults in the live StatefulSet. When
+			// every explicit desired field matches, store the desired hash so those
+			// defaults do not cause a one-time rollout during initial adoption.
+			currentHash = desiredHash
+		} else {
+			currentHash = computeRolloutSpecHashForTemplate(cluster.StatefulSet.Spec.Template)
+		}
 		r.Log.Info("detectSpecChanges: initializing rollout hash from active StatefulSet",
 			"hash", truncateChecksum(currentHash))
 		if err := r.updateRedisClusterStatusWithRetry(ctx, cluster.RedisCluster,
@@ -159,37 +171,105 @@ func computeSpecHash(cluster *redis_cluster.Cluster) string {
 // handleScaling, while backup controls are consumed live from the CR; neither
 // requires replacing Redis pods.
 func computeRolloutSpecHash(cluster *redis_cluster.Cluster) string {
-	return computeRolloutSpecHashForTemplate(cluster.RedisCluster.Spec.StatefulsetTemplate.Spec.Template)
+	return computeRolloutSpecHashForTemplate(rolloutTemplateForCluster(cluster))
+}
+
+func rolloutTemplateForCluster(cluster *redis_cluster.Cluster) corev1.PodTemplateSpec {
+	template := cluster.RedisCluster.Spec.StatefulsetTemplate.Spec.Template.DeepCopy()
+	if template.Labels == nil {
+		template.Labels = make(map[string]string)
+	}
+	if selector := cluster.RedisCluster.Spec.StatefulsetTemplate.Spec.Selector; selector != nil {
+		// The compatibility CRD can prune embedded PodTemplate metadata. The
+		// operator restores selector labels when it creates the StatefulSet, so
+		// include the same labels in the desired hash. Otherwise a new cluster
+		// appears changed as soon as the API server returns the live template and
+		// starts an unnecessary blue/green rollout.
+		maps.Copy(template.Labels, selector.MatchLabels)
+	}
+	return *template
 }
 
 func computeRolloutSpecHashForTemplate(template corev1.PodTemplateSpec) string {
-	labels := make(map[string]string, len(template.Labels))
-	for key, value := range template.Labels {
-		if key == constants.BlueGreenRoleLabel || key == constants.RedisClusterReadyPodLabel {
+	normalized := normalizeRolloutTemplate(template)
+	data, _ := json.Marshal(normalized)
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum)
+}
+
+func normalizeRolloutTemplate(template corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+	normalized := template.DeepCopy()
+	labels := make(map[string]string, len(normalized.Labels))
+	for key, value := range normalized.Labels {
+		if key == constants.BlueGreenRoleLabel ||
+			key == constants.RedisClusterReadyPodLabel ||
+			key == constants.BlueGreenStatefulSetLabel {
 			continue
 		}
 		labels[key] = value
 	}
+	normalized.Labels = labels
 
-	h := struct {
-		Annotations map[string]string `json:"a"`
-		Labels      map[string]string `json:"l"`
-		Images      []string          `json:"i"`
-	}{
-		Annotations: template.Annotations,
-		Labels:      labels,
+	// The operator rewrites this value to the rollout's private peer Service.
+	// Exclude that generated value while retaining the rest of each container.
+	for containerIndex := range normalized.Spec.Containers {
+		for envIndex := range normalized.Spec.Containers[containerIndex].Env {
+			env := &normalized.Spec.Containers[containerIndex].Env[envIndex]
+			if env.Name == "REDIS_SERVICE_NAME" {
+				env.Value = "<operator-managed>"
+				env.ValueFrom = nil
+			}
+		}
 	}
 
-	for _, c := range template.Spec.InitContainers {
-		h.Images = append(h.Images, c.Name+"="+c.Image)
-	}
-	for _, c := range template.Spec.Containers {
-		h.Images = append(h.Images, c.Name+"="+c.Image)
-	}
+	return *normalized
+}
 
-	data, _ := json.Marshal(h)
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum)
+func rolloutTemplateMatchesLive(desired, live corev1.PodTemplateSpec) bool {
+	var desiredJSON, liveJSON any
+	desiredData, err := json.Marshal(normalizeRolloutTemplate(desired))
+	if err != nil || json.Unmarshal(desiredData, &desiredJSON) != nil {
+		return false
+	}
+	liveData, err := json.Marshal(normalizeRolloutTemplate(live))
+	if err != nil || json.Unmarshal(liveData, &liveJSON) != nil {
+		return false
+	}
+	return jsonValueIsSubset(desiredJSON, liveJSON)
+}
+
+// jsonValueIsSubset compares the JSON shape submitted by the user with the
+// API-server-persisted shape. Extra object fields in live are Kubernetes
+// defaults; arrays remain exact so removing a container, volume, argument, or
+// environment variable is still detected during hash migration.
+func jsonValueIsSubset(desired, live any) bool {
+	switch desiredValue := desired.(type) {
+	case map[string]any:
+		liveValue, ok := live.(map[string]any)
+		if !ok {
+			return false
+		}
+		for key, value := range desiredValue {
+			liveField, found := liveValue[key]
+			if !found || !jsonValueIsSubset(value, liveField) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		liveValue, ok := live.([]any)
+		if !ok || len(desiredValue) != len(liveValue) {
+			return false
+		}
+		for index := range desiredValue {
+			if !jsonValueIsSubset(desiredValue[index], liveValue[index]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(desired, live)
+	}
 }
 
 // truncateChecksum returns first 8 chars of checksum for logging (or "empty" if empty)
@@ -572,6 +652,7 @@ func (r *RedisClusterReconciler) refreshCluster(ctx context.Context, cluster *re
 		_ = r.Metrics.CountBadSituation("could_not_get_cluster")
 		return nil, utils.WrapErr(err, "failed to refresh cluster")
 	}
+	restorePrunedStatefulSetMetadata(redisCluster)
 
 	// ensure the StatefulSet is still ready
 	statefulSetIsReady := redisCluster.Status.StatefulSetReady
