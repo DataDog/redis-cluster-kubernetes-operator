@@ -3,6 +3,7 @@ package redis_cluster
 import (
 	"context"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strconv"
@@ -288,7 +289,7 @@ func parseInfoLine(node *ClusterNode, line string) {
 
 // parseNodeLine parses one CLUSTER NODES output line.
 func parseNodeLine(nodes []*ClusterNode, node *ClusterNode, line string, log logr.Logger) []*ClusterNode {
-	details := strings.Split(line, " ")
+	details := strings.Fields(line)
 	if len(details) < 8 {
 		log.Info("Bad details format", "details", details)
 		return nodes
@@ -302,22 +303,10 @@ func parseNodeLine(nodes []*ClusterNode, node *ClusterNode, line string, log log
 	lineLinkState := details[7]
 	lineFlags, myself := parseFlags(details[2])
 
-	addressParts := strings.SplitN(details[1], ",", 2)
-	ipPort := strings.Split(addressParts[0], ":")
-	if len(ipPort) < 2 {
-		log.Info("Bad ipPort", "ipPort", ipPort, "details", details)
+	lineIP, lineHostname, addressOK := ParseClusterNodeAddress(details[1])
+	if !addressOK {
+		log.Info("Bad node address", "address", details[1], "details", details)
 		return nodes
-	}
-	portGossip := strings.Split(ipPort[1], "@")
-	if len(portGossip) < 2 {
-		log.Info("Bad portGossip", "portGossip", portGossip, "details", details)
-		return nodes
-	}
-	//linePort := portGossip[0]
-	lineIP := ipPort[0] // beware, self-IP can be empty on new nodes
-	lineHostname := ""
-	if len(addressParts) == 2 {
-		lineHostname = addressParts[1]
 	}
 
 	lineSlotsRanges, lineOpenSlots := parseSlotTokens(details[8:], log)
@@ -379,6 +368,36 @@ func parseNodeLine(nodes []*ClusterNode, node *ClusterNode, line string, log log
 	}
 
 	return nodes
+}
+
+// ParseClusterNodeAddress extracts the host and optional announced hostname from
+// Redis' CLUSTER NODES address field: host:port@bus-port[,hostname]. It accepts
+// bracketed and unbracketed IPv6 addresses in addition to IPv4 and DNS names.
+func ParseClusterNodeAddress(value string) (host, hostname string, ok bool) {
+	endpoint, hostname, _ := strings.Cut(value, ",")
+	clientAddress, busPort, found := strings.Cut(endpoint, "@")
+	if !found || busPort == "" {
+		return "", "", false
+	}
+	if _, err := strconv.Atoi(busPort); err != nil {
+		return "", "", false
+	}
+
+	host, port, err := net.SplitHostPort(clientAddress)
+	if err != nil {
+		// Redis can emit unbracketed IPv6. The final colon still separates the
+		// client port, while every earlier colon belongs to the address.
+		separator := strings.LastIndexByte(clientAddress, ':')
+		if separator < 0 {
+			return "", "", false
+		}
+		host = strings.Trim(clientAddress[:separator], "[]")
+		port = clientAddress[separator+1:]
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return "", "", false
+	}
+	return host, hostname, true
 }
 
 func parseSlotTokens(tokens []string, log logr.Logger) ([]SlotsRange, []OpenSlot) {

@@ -446,7 +446,7 @@ func (h *Handler) bgCreateGreen(ctx context.Context, cluster *redis_cluster.Clus
 func (h *Handler) bgWaitForPods(ctx context.Context, cluster *redis_cluster.Cluster) (ctrl.Result, health.ClusterHealth, error) {
 	bgStatus := &cluster.RedisCluster.Status.BlueGreen
 
-	greenSTS, err := h.deps.GetGreenStatefulSet(ctx, cluster.RedisCluster.Namespace, GreenSTSName(cluster.RedisCluster))
+	greenSTS, err := h.deps.GetGreenStatefulSet(ctx, cluster.RedisCluster, GreenSTSName(cluster.RedisCluster))
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			if reset, resetErr := h.bgResetIfGreenSTSGone(ctx, cluster); reset {
@@ -636,14 +636,6 @@ func (h *Handler) bgWaitForSync(ctx context.Context, cluster *redis_cluster.Clus
 		return ctrl.Result{}, health.Error, fmt.Errorf("no shard mapping found in status")
 	}
 
-	didBackup, backupErr := h.deps.RunBackup(ctx, cluster)
-	if backupErr != nil {
-		h.log.Error(backupErr, "Failed to run backup during BG sync (non-fatal)")
-	}
-	if didBackup {
-		cluster.RedisCluster.Status.LastBackupTime = time.Now().Unix()
-	}
-
 	for _, mapping := range bgStatus.ShardMapping {
 		if !cluster.Toolbox.PingIP(mapping.GreenPodIP) {
 			return ctrl.Result{}, health.Error,
@@ -764,12 +756,15 @@ func (h *Handler) bgWaitForSync(ctx context.Context, cluster *redis_cluster.Clus
 		return ctrl.Result{RequeueAfter: constants.BlueGreenSyncCheckDelay}, health.Warn, nil
 	}
 
-	h.log.Info("All shards synced, triggering pre-promotion backup")
-	didSafetyBackup, safetyErr := h.deps.RunBackup(ctx, cluster)
-	if safetyErr != nil {
-		h.log.Error(safetyErr, "Pre-promotion safety backup failed (non-fatal, proceeding)")
-	}
-	if didSafetyBackup {
+	if cluster.RedisCluster.Spec.BackupEnabled {
+		h.log.Info("All shards synced, triggering pre-promotion safety backup")
+		didSafetyBackup, safetyErr := h.deps.RunSafetyBackup(ctx, cluster)
+		if safetyErr != nil {
+			return ctrl.Result{}, health.Error, utils.WrapErr(safetyErr, "pre-promotion safety backup failed")
+		}
+		if !didSafetyBackup {
+			return ctrl.Result{}, health.Error, fmt.Errorf("pre-promotion safety backup did not produce a backup")
+		}
 		cluster.RedisCluster.Status.LastBackupTime = time.Now().Unix()
 	}
 
@@ -873,8 +868,8 @@ func (h *Handler) bgPromote(ctx context.Context, cluster *redis_cluster.Cluster)
 		return ctrl.Result{RequeueAfter: constants.BlueGreenInterShardFailoverDelay}, health.Warn, nil
 	}
 
-	useForce := bgStatus.ResumeForwardAttempts >= int32(constants.BlueGreenForceAttemptThreshold)
 	useTakeover := bgStatus.ResumeForwardAttempts >= int32(constants.BlueGreenTakeoverAttemptThreshold)
+	useForce := !useTakeover && bgStatus.ResumeForwardAttempts >= int32(constants.BlueGreenForceAttemptThreshold)
 	failoverMode := "soft"
 	if useTakeover {
 		failoverMode = "TAKEOVER"
@@ -1511,60 +1506,65 @@ func (h *Handler) bgFormGreenCluster(ctx context.Context, cluster *redis_cluster
 	if err != nil {
 		return ctrl.Result{}, health.Error, utils.WrapErr(err, "failed to get CLUSTER NODES for replica MEET")
 	}
-	// Build node state from CLUSTER NODES for idempotency checks
-	nodesInCluster := make(map[string]bool)
-	nodeIPToRole := make(map[string]string)
-	nodeIPToMaster := make(map[string]string)
-	for _, line := range strings.Split(postForgetNodes, "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 2 {
-			ip := strings.Split(fields[1], ":")[0]
-			nodesInCluster[ip] = true
-			if len(fields) >= 4 {
-				flags := fields[2]
-				if strings.Contains(flags, "slave") {
-					nodeIPToRole[ip] = "slave"
-					nodeIPToMaster[ip] = fields[3]
-				} else if strings.Contains(flags, "master") {
-					nodeIPToRole[ip] = "master"
-				}
+	// Build node state from CLUSTER NODES for idempotency checks.
+	initialByID, initialIPToID := parseClusterNodesFrom(postForgetNodes, firstGreenIP)
+
+	type replicaInfo struct {
+		pod       *corev1.Pod
+		primaryID string
+		primaryIP string
+	}
+	replicaAssignments := make([]replicaInfo, 0, numPrimaries*replicasPerPrimary)
+	if replicasPerPrimary > 0 {
+		expectedPodCount := numPrimaries * (replicasPerPrimary + 1)
+		if len(greenPods) < expectedPodCount {
+			bgStatus.Message = fmt.Sprintf("Waiting for all green pods before replica verification (%d/%d)", len(greenPods), expectedPodCount)
+			if err := h.deps.UpdateStatus(ctx, cluster.RedisCluster); err != nil {
+				return ctrl.Result{}, health.Error, err
 			}
+			return ctrl.Result{RequeueAfter: constants.ShortSleepTime}, health.Warn, nil
+		}
+		for expectedIndex := 0; expectedIndex < expectedPodCount; expectedIndex++ {
+			if GetPodIndex(greenPods[expectedIndex].Name) != expectedIndex {
+				bgStatus.Message = fmt.Sprintf("Waiting for green pod ordinal %d before replica verification", expectedIndex)
+				if err := h.deps.UpdateStatus(ctx, cluster.RedisCluster); err != nil {
+					return ctrl.Result{}, health.Error, err
+				}
+				return ctrl.Result{RequeueAfter: constants.ShortSleepTime}, health.Warn, nil
+			}
+		}
+		for replicaOffset := 0; replicaOffset < numPrimaries*replicasPerPrimary; replicaOffset++ {
+			podIndex := numPrimaries + replicaOffset
+			replicaPod := &greenPods[podIndex]
+			if replicaPod.Status.Phase != corev1.PodRunning || replicaPod.Status.PodIP == "" {
+				bgStatus.Message = fmt.Sprintf("Waiting for green replica %s to be running", replicaPod.Name)
+				if err := h.deps.UpdateStatus(ctx, cluster.RedisCluster); err != nil {
+					return ctrl.Result{}, health.Error, err
+				}
+				return ctrl.Result{RequeueAfter: constants.ShortSleepTime}, health.Warn, nil
+			}
+			primaryIndex := replicaOffset / replicasPerPrimary
+			replicaAssignments = append(replicaAssignments, replicaInfo{
+				pod:       replicaPod,
+				primaryID: greenPrimaryIDs[primaryIndex],
+				primaryIP: bgStatus.ShardMapping[primaryIndex].GreenPodIP,
+			})
 		}
 	}
 
-	if len(greenPods) > numPrimaries && replicasPerPrimary > 0 {
+	if len(replicaAssignments) > 0 {
 		h.log.Info("Adding green replica pods to cluster (batched by replica index)",
-			"replicaPods", len(greenPods)-numPrimaries, "replicasPerPrimary", replicasPerPrimary)
-
-		type replicaInfo struct {
-			pod       *corev1.Pod
-			primaryID string
-		}
+			"replicaPods", len(replicaAssignments), "replicasPerPrimary", replicasPerPrimary)
 
 		var pendingReplicas []replicaInfo
-		replicasAdded := 0
-		for i := numPrimaries; i < len(greenPods); i++ {
-			replicaPod := greenPods[i]
-			if replicaPod.Status.Phase != corev1.PodRunning || replicaPod.Status.PodIP == "" {
-				h.log.Info("Skipping non-running green replica pod", "pod", replicaPod.Name)
-				continue
-			}
-
-			primaryIdx := replicasAdded / replicasPerPrimary
-			if primaryIdx >= numPrimaries {
-				primaryIdx = primaryIdx % numPrimaries
-			}
-			primaryID := greenPrimaryIDs[primaryIdx]
-
-			if nodesInCluster[replicaPod.Status.PodIP] {
-				if nodeIPToRole[replicaPod.Status.PodIP] == "slave" && nodeIPToMaster[replicaPod.Status.PodIP] == primaryID {
-					replicasAdded++
+		for _, replica := range replicaAssignments {
+			if nodeID := initialIPToID[replica.pod.Status.PodIP]; nodeID != "" {
+				node := initialByID[nodeID]
+				if !node.isMaster && node.primaryID == replica.primaryID && node.connected && !node.isFail {
 					continue
 				}
 			}
-
-			pendingReplicas = append(pendingReplicas, replicaInfo{pod: &greenPods[i], primaryID: primaryID})
-			replicasAdded++
+			pendingReplicas = append(pendingReplicas, replica)
 		}
 
 		if len(pendingReplicas) > 0 {
@@ -1604,7 +1604,13 @@ func (h *Handler) bgFormGreenCluster(ctx context.Context, cluster *redis_cluster
 				h.log.Info("Batch MEET complete, replicas paused, waiting for gossip",
 					"batch", batchNum+1, "count", len(batch),
 					"delay", constants.BlueGreenGossipSettleDelay.String())
-				time.Sleep(constants.BlueGreenGossipSettleDelay)
+				gossipTimer := time.NewTimer(constants.BlueGreenGossipSettleDelay)
+				select {
+				case <-ctx.Done():
+					gossipTimer.Stop()
+					return ctrl.Result{}, health.Error, ctx.Err()
+				case <-gossipTimer.C:
+				}
 
 				replicateFailures := 0
 				for _, r := range batch {
@@ -1646,6 +1652,36 @@ func (h *Handler) bgFormGreenCluster(ctx context.Context, cluster *redis_cluster
 			allOK = false
 		}
 	}
+	if allOK && len(replicaAssignments) > 0 {
+		_, finalClusterNodes, _, nodesErr := cluster.Toolbox.ClusterNodes(ctx, firstGreenIP)
+		if nodesErr != nil {
+			h.log.Info("Cannot verify green replicas from CLUSTER NODES", "err", nodesErr)
+			allOK = false
+		} else {
+			finalByID, finalIPToID := parseClusterNodesFrom(finalClusterNodes, firstGreenIP)
+			for _, replica := range replicaAssignments {
+				nodeID := finalIPToID[replica.pod.Status.PodIP]
+				node, found := finalByID[nodeID]
+				if !found || node.isMaster || node.primaryID != replica.primaryID || !node.connected || node.isFail {
+					h.log.Info("Green replica is not attached to its expected primary",
+						"pod", replica.pod.Name,
+						"primaryID", replica.primaryID,
+						"observedNodeID", nodeID,
+						"observedPrimaryID", node.primaryID)
+					allOK = false
+					continue
+				}
+				synced, syncErr := h.isReplicaSynced(cluster.Toolbox, replica.pod.Status.PodIP, replica.primaryIP)
+				if syncErr != nil || !synced {
+					h.log.Info("Green replica is not fully synchronized",
+						"pod", replica.pod.Name,
+						"primaryIP", replica.primaryIP,
+						"err", syncErr)
+					allOK = false
+				}
+			}
+		}
+	}
 
 	if !allOK {
 		bgStatus.Message = "Green cluster verification — waiting for convergence"
@@ -1655,7 +1691,7 @@ func (h *Handler) bgFormGreenCluster(ctx context.Context, cluster *redis_cluster
 
 	formingDuration := time.Since(time.Unix(bgStatus.PhaseEntryTime, 0)).Milliseconds()
 	_ = h.metrics.Timing(metrics.TimingBlueGreenPhaseDuration, formingDuration, "phase:forming_cluster")
-	h.log.Info("Green cluster verified (all 16384 slots, cluster_state:ok), proceeding to scale down blue",
+	h.log.Info("Green cluster verified (all slots, primaries, and replicas healthy), proceeding to scale down blue",
 		"forming_cluster_duration_ms", formingDuration)
 
 	setPhase(bgStatus, cachev1.BlueGreenPhaseScalingDownBlue, "Green cluster formed, scaling down blue")
@@ -1831,7 +1867,7 @@ func (h *Handler) bgCleanupFailed(ctx context.Context, cluster *redis_cluster.Cl
 	gName := GreenSTSName(cluster.RedisCluster)
 	h.log.Info("Operator deleting green resources during rollback (after FORGET)",
 		"greenSTS", gName)
-	if err := h.deps.DeleteGreenResources(ctx, cluster.RedisCluster.Namespace, gName); err != nil {
+	if err := h.deps.DeleteGreenResources(ctx, cluster.RedisCluster, gName); err != nil {
 		h.log.Error(err, "Failed to clean up green resources (will retry)")
 		return ctrl.Result{RequeueAfter: constants.DefaultSleepTime}, health.Error,
 			utils.WrapErr(err, "failed to delete green resources during cleanup")
