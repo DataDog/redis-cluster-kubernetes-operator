@@ -243,7 +243,7 @@ func (r *RedisClusterReconciler) backup(ctx context.Context, cluster *redis_clus
 		err := fmt.Errorf("backup incomplete: %d of %d node(s) failed (pod indexes: %v); previous good backup left intact",
 			len(failedNodes), len(cluster.AllNodes), failedNodes)
 		if cleanupErr != nil {
-			err = fmt.Errorf("%w; failed to clean incomplete backup: %v", err, cleanupErr)
+			err = fmt.Errorf("%w; failed to clean incomplete backup: %w", err, cleanupErr)
 		}
 		r.Log.Error(err, "Backup not promoted", "successCount", successCount, "duration_ms", totalDuration.Milliseconds())
 		return false, err
@@ -301,10 +301,10 @@ func replaceLatestWithInProgress(ctx context.Context, store ObjectStore, inProgr
 		}
 
 		if cleanupErr := store.DeletePrefix(ctx, latestPath); cleanupErr != nil && !IsBackendNotFound(cleanupErr) {
-			return fmt.Errorf("%w; failed to clear partial latest before rollback: %v", promotionErr, cleanupErr)
+			return fmt.Errorf("%w; failed to clear partial latest before rollback: %w", promotionErr, cleanupErr)
 		}
 		if rollbackErr := store.CopyPrefix(ctx, previousPath, latestPath); rollbackErr != nil {
-			return fmt.Errorf("%w; failed to restore previous to latest: %v", promotionErr, rollbackErr)
+			return fmt.Errorf("%w; failed to restore previous to latest: %w", promotionErr, rollbackErr)
 		}
 		return fmt.Errorf("%w; restored previous backup to latest", promotionErr)
 	}
@@ -821,7 +821,7 @@ func parseSlotRange(part string) (int, int, bool) {
 // err+rc alone silently passes through those cases.
 func redisCliError(rc int, stdout, stderr string, err error) error {
 	if err != nil {
-		return fmt.Errorf("exec failed: %v", err)
+		return fmt.Errorf("exec failed: %w", err)
 	}
 	if rc != 0 {
 		return fmt.Errorf("rc=%d stdout=%q stderr=%q", rc, stdout, stderr)
@@ -847,7 +847,7 @@ func (r *RedisClusterReconciler) waitForBGSave(ctx context.Context, cluster *red
 	for i := 0; i < 120; i++ {
 		rc, stdout, stderr, err := cluster.Toolbox.PersistenceInfo(node)
 		if e := redisCliError(rc, stdout, stderr, err); e != nil {
-			return fmt.Errorf("failed to check persistence info: %v", e)
+			return fmt.Errorf("failed to check persistence info: %w", e)
 		}
 		if !strings.Contains(stdout, "rdb_bgsave_in_progress:1") {
 			return nil
@@ -862,13 +862,13 @@ func (r *RedisClusterReconciler) waitForBGSave(ctx context.Context, cluster *red
 func (r *RedisClusterReconciler) triggerBGSave(ctx context.Context, cluster *redis_cluster.Cluster, node *redis_cluster.ClusterNode) error {
 	rc, origSave, stderr, err := cluster.Toolbox.LastSave(node)
 	if e := redisCliError(rc, origSave, stderr, err); e != nil {
-		return fmt.Errorf("failed to get lastsave: %v", e)
+		return fmt.Errorf("failed to get lastsave: %w", e)
 	}
 	origSave = strings.TrimSpace(origSave)
 
 	rc, stdout, stderr, err := cluster.Toolbox.BGSave(node)
 	if e := redisCliError(rc, stdout, stderr, err); e != nil {
-		return fmt.Errorf("failed to trigger bgsave: %v", e)
+		return fmt.Errorf("failed to trigger bgsave: %w", e)
 	}
 
 	for i := 0; i < 120; i++ {

@@ -87,7 +87,8 @@ func (r *RedisClustersReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// from pod/StatefulSet events targeting non-existent RedisCluster CRs.
 	cacheKey := req.NamespacedName.String()
 	if ts, ok := r.notFoundCache.Load(cacheKey); ok {
-		if time.Since(ts.(time.Time)) < constants.NotFoundCacheTTL {
+		cachedAt, valid := ts.(time.Time)
+		if valid && time.Since(cachedAt) < constants.NotFoundCacheTTL {
 			return ctrl.Result{}, nil
 		}
 		r.notFoundCache.Delete(cacheKey)
