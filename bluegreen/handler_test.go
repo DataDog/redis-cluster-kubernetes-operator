@@ -23,7 +23,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -766,6 +768,40 @@ func TestDeleteGreenResources_AlreadyGone(t *testing.T) {
 
 	err := cc.DeleteGreenResources(ctx, rc, "nonexistent-green")
 	require.NoError(t, err)
+}
+
+func TestDeleteGreenResourcesKeepsOwnershipEvidenceWhenPVCDeletionFails(t *testing.T) {
+	rc := newRedisCluster("redis-cluster-test", "default", 1, 0)
+	scheme := newScheme(t)
+	pvcDeleteErr := errors.New("injected PVC deletion failure")
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(rc).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, k8sClient client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if _, isPVC := obj.(*corev1.PersistentVolumeClaim); isPVC {
+					return pvcDeleteErr
+				}
+				return k8sClient.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	cc := redis_cluster.ClusterClient{
+		Client: fakeClient, ClusterScheme: scheme, Namespace: "default",
+		Log: logr.Discard(), Metrics: metrics.CreateNoop(),
+	}
+	greenSTS, greenName, err := cc.CreateGreenStatefulSet(context.Background(), rc)
+	require.NoError(t, err)
+	require.NoError(t, fakeClient.Create(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-" + greenName + "-0", Namespace: "default"},
+	}))
+
+	err = cc.DeleteGreenResources(context.Background(), rc, greenName)
+
+	require.ErrorIs(t, err, pvcDeleteErr)
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{
+		Name: greenSTS.Name, Namespace: greenSTS.Namespace,
+	}, &appsv1.StatefulSet{}), "owned StatefulSet must remain so the next retry can verify PVC ownership")
 }
 
 func TestDeleteGreenResourcesRejectsForeignStatefulSet(t *testing.T) {
