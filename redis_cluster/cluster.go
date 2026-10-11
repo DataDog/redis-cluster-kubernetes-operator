@@ -111,31 +111,54 @@ func mergeRedisNodes(t *Toolbox, nodes []*ClusterNode) ([]*ClusterNode, error) {
 	ctx, cancel := context.WithTimeout(t.ctx, clusterViewTimeout(len(nodes)))
 	defer cancel()
 	var response strings.Builder
+	clusterViews := 0
 	for _, node := range nodes {
 		rc, info, _, err := t.ClusterInfo(ctx, node.IP)
 		if err == nil && rc != 0 {
 			err = fmt.Errorf("command exit code was %d", rc)
 		}
-		if err != nil {
-			return nil, utils.WrapErr(err, "failed to get Redis info")
+		if err == nil && strings.HasPrefix(strings.TrimSpace(info), "ERR") {
+			err = fmt.Errorf("Redis returned %s", strings.TrimSpace(info))
 		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, utils.WrapErr(ctx.Err(), "failed to get Redis info before cluster-view deadline")
+			}
+			t.Log.Info("Redis INFO unavailable; retaining pod in partial cluster view", "podName", node.PodName, "podIP", node.IP, "err", err)
+		} else {
+			response.WriteString(info)
+			if !strings.HasSuffix(info, "\n") {
+				response.WriteByte('\n')
+			}
+		}
+		response.WriteString("PONG\n")
+
 		rc, clusterNodes, _, err := t.runRedis(ctx, node.IP, t.RedisPort, "CLUSTER", "NODES")
 		if err == nil && rc != 0 {
 			err = fmt.Errorf("command exit code was %d", rc)
 		}
+		if err == nil && strings.HasPrefix(strings.TrimSpace(clusterNodes), "ERR") {
+			err = fmt.Errorf("Redis returned %s", strings.TrimSpace(clusterNodes))
+		}
+		if err == nil && strings.TrimSpace(clusterNodes) == "" {
+			err = fmt.Errorf("Redis returned an empty CLUSTER NODES view")
+		}
 		if err != nil {
-			return nil, utils.WrapErr(err, "failed to get Redis nodes")
-		}
-		response.WriteString(info)
-		if !strings.HasSuffix(info, "\n") {
-			response.WriteByte('\n')
+			if ctx.Err() != nil {
+				return nil, utils.WrapErr(ctx.Err(), "failed to get Redis nodes before cluster-view deadline")
+			}
+			t.Log.Info("Redis CLUSTER NODES unavailable; retaining pod in partial cluster view", "podName", node.PodName, "podIP", node.IP, "err", err)
+		} else {
+			clusterViews++
+			response.WriteString(clusterNodes)
+			if !strings.HasSuffix(clusterNodes, "\n") {
+				response.WriteByte('\n')
+			}
 		}
 		response.WriteString("PONG\n")
-		response.WriteString(clusterNodes)
-		if !strings.HasSuffix(clusterNodes, "\n") {
-			response.WriteByte('\n')
-		}
-		response.WriteString("PONG\n")
+	}
+	if clusterViews == 0 {
+		return nil, fmt.Errorf("no Redis process returned a usable CLUSTER NODES view")
 	}
 	t.Log.Info("Got Redis info+nodes")
 
@@ -179,8 +202,35 @@ func mergeRedisNodes(t *Toolbox, nodes []*ClusterNode) ([]*ClusterNode, error) {
 			}
 		}
 	}
+	hydrateUnavailableNodesFromViews(nodes)
 
 	return nodes, nil
+}
+
+func hydrateUnavailableNodesFromViews(nodes []*ClusterNode) {
+	for _, node := range nodes {
+		if node.ID != "" || len(node.Views) == 0 {
+			continue
+		}
+		indexes := make([]int, 0, len(node.Views))
+		for index := range node.Views {
+			indexes = append(indexes, index)
+		}
+		sort.Ints(indexes)
+		for _, index := range indexes {
+			view := node.Views[index]
+			if view == nil || view.ID == "" {
+				continue
+			}
+			node.ID = view.ID
+			node.Flags = append([]string(nil), view.Flags...)
+			node.PrimaryID = view.Master
+			node.LinkState = view.LinkState
+			node.SlotsRanges = append([]SlotsRange(nil), view.SlotsRanges...)
+			node.OpenSlots = append([]OpenSlot(nil), view.OpenSlots...)
+			break
+		}
+	}
 }
 
 // parseInfoLine parses one CLUSTER INFO output line.
