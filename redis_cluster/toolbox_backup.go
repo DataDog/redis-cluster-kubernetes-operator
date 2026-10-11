@@ -121,10 +121,10 @@ func (t *Toolbox) BackupFileMetadata(ctx context.Context, node *ClusterNode, fil
 // ActivateStagedDump replaces dump.rdb with the validated staged artifact and
 // restores the permissions expected by the Redis container.
 func (t *Toolbox) ActivateStagedDump(node *ClusterNode) error {
-	if _, err := t.execBackupFileCommand(t.Context(), node, []string{"mv", "--", stagedDumpPath, dumpRDBPath}); err != nil {
+	if _, err := t.execBackupFileCommand(t.Context(), node, []string{"chmod", "a+rw", "--", stagedDumpPath}); err != nil {
 		return err
 	}
-	_, err := t.execBackupFileCommand(t.Context(), node, []string{"chmod", "a+rw", "--", dumpRDBPath})
+	_, err := t.execBackupFileCommand(t.Context(), node, []string{"mv", "--", stagedDumpPath, dumpRDBPath})
 	return err
 }
 

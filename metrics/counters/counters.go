@@ -7,7 +7,7 @@ const (
 	ClusterMeet        = "cluster_meet"
 	ClusterRestored    = "cluster_restored"
 	ClusterBackedUp    = "cluster_backed_up"
-	StatefulSetCreated = "statefuleset_created"
+	StatefulSetCreated = "statefulset_created"
 	StatefulSetUpdated = "statefulset_updated"
 
 	// Zombie and NLA related counters
