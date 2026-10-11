@@ -224,6 +224,9 @@ type RedisClusterStatus struct {
 	LastBackupDurationMs  int64              `json:"last_backup_duration_ms,omitempty"`
 	LastBackupFailedNodes []int              `json:"last_backup_failed_nodes,omitempty"`
 	BackupRestored        bool               `json:"backup_restored"`
+	// RestorePath records the backup generation selected for the current restore
+	// so topology reconstruction uses the same generation across reconciles.
+	RestorePath string `json:"restore_path,omitempty"`
 	// RestoreTopologyPending limits manifest-guided slot reconstruction to the
 	// cluster formation immediately following a restore.
 	RestoreTopologyPending bool   `json:"restore_topology_pending,omitempty"`
