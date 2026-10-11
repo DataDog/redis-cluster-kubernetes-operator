@@ -65,8 +65,33 @@ func TestToolbox_RedisArgvBoundary(t *testing.T) {
 
 			calls := stub.Calls()
 			require.Len(t, calls, 1)
-			assert.Equal(t, []string{"redis-cli", "-h", tc.ip, "-p", "6379", "CLUSTER", "NODES"}, calls[0].Command)
+			assert.Equal(t, []string{"redis-cli", "-e", "-h", tc.ip, "-p", "6379", "CLUSTER", "NODES"}, calls[0].Command)
 			assert.NotContains(t, calls[0].Command, "bash")
+		})
+	}
+}
+
+func TestToolboxAppendOnlyEnabled(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		output  string
+		enabled bool
+	}{
+		{name: "enabled", output: "appendonly\nyes\n", enabled: true},
+		{name: "disabled", output: "appendonly\nno\n", enabled: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stub := toolbox.New().OnCommand(
+				"appendonly",
+				func(_, _ string, command []string) bool {
+					return strings.Contains(strings.Join(command, " "), "CONFIG GET appendonly")
+				},
+				toolbox.Stdout(test.output),
+			)
+			tb := newToolboxWithStub(stub)
+			enabled, err := tb.AppendOnlyEnabled(context.Background(), &ClusterNode{IP: "10.0.0.1"})
+			require.NoError(t, err)
+			assert.Equal(t, test.enabled, enabled)
 		})
 	}
 }
@@ -81,7 +106,7 @@ func TestToolbox_MountedSecretAuthNeverPlacesCredentialsInExecRequest(t *testing
 
 	calls := stub.Calls()
 	require.Len(t, calls, 1)
-	assert.Equal(t, []string{mountedSecretRedisCLI, "-h", "10.0.0.1", "-p", "6379", "CLUSTER", "INFO"}, calls[0].Command)
+	assert.Equal(t, []string{mountedSecretRedisCLI, "-e", "-h", "10.0.0.1", "-p", "6379", "CLUSTER", "INFO"}, calls[0].Command)
 	joined := strings.Join(calls[0].Command, " ")
 	assert.NotContains(t, joined, "username")
 	assert.NotContains(t, joined, "password")
@@ -307,8 +332,8 @@ func TestToolbox_CreateAndRebalanceUseFixedClusterArguments(t *testing.T) {
 	require.NoError(t, tb.RebalanceWeighted(cluster, []NodeWeight{{NodeID: testPrimaryID, Weight: 0}, {NodeID: testReplicaID, Weight: 1.5}}, true))
 	calls := stub.Calls()
 	require.Len(t, calls, 2)
-	assert.Equal(t, []string{"redis-cli", "--cluster", "create", "10.0.0.1:6379", "10.0.0.2:6379", "--cluster-replicas", "1", "--cluster-yes"}, calls[0].Command)
-	assert.Equal(t, []string{"redis-cli", "--cluster", "rebalance", "10.0.0.1:6379", "--cluster-use-empty-masters", "--cluster-weight", testPrimaryID + "=0", testReplicaID + "=1.5"}, calls[1].Command)
+	assert.Equal(t, []string{"redis-cli", "-e", "--cluster", "create", "10.0.0.1:6379", "10.0.0.2:6379", "--cluster-replicas", "1", "--cluster-yes"}, calls[0].Command)
+	assert.Equal(t, []string{"redis-cli", "-e", "--cluster", "rebalance", "10.0.0.1:6379", "--cluster-use-empty-masters", "--cluster-weight", testPrimaryID + "=0", testReplicaID + "=1.5"}, calls[1].Command)
 }
 
 func TestToolbox_CreateMeetAndQueryUseSelectedAuthenticationMode(t *testing.T) {
@@ -392,8 +417,8 @@ func TestToolbox_SetReplicaMigrationAttemptsEveryNode(t *testing.T) {
 
 	calls := stub.Calls()
 	require.Len(t, calls, 2)
-	assert.Equal(t, []string{"redis-cli", "-h", "10.0.0.1", "-p", "6379", "CONFIG", "SET", "cluster-allow-replica-migration", "no"}, calls[0].Command)
-	assert.Equal(t, []string{"redis-cli", "-h", "10.0.0.2", "-p", "6379", "CONFIG", "SET", "cluster-allow-replica-migration", "no"}, calls[1].Command)
+	assert.Equal(t, []string{"redis-cli", "-e", "-h", "10.0.0.1", "-p", "6379", "CONFIG", "SET", "cluster-allow-replica-migration", "no"}, calls[0].Command)
+	assert.Equal(t, []string{"redis-cli", "-e", "-h", "10.0.0.2", "-p", "6379", "CONFIG", "SET", "cluster-allow-replica-migration", "no"}, calls[1].Command)
 }
 
 func TestToolbox_SetReplicaMigrationRequiresEveryNodeToAcknowledge(t *testing.T) {

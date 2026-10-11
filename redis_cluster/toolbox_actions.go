@@ -781,6 +781,55 @@ func (t *Toolbox) PersistenceInfo(node *ClusterNode) (int, string, string, error
 	return t.runRedis(t.ctx, node.IP, t.RedisPort, "INFO", "persistence")
 }
 
+// AppendOnlyEnabled reports whether Redis is configured to load AOF data on restart.
+func (t *Toolbox) AppendOnlyEnabled(ctx context.Context, node *ClusterNode) (bool, error) {
+	if err := t.validate(); err != nil {
+		return false, err
+	}
+	if err := validateClusterNode(node); err != nil {
+		return false, err
+	}
+	rc, stdout, stderr, err := t.runRedis(ctx, node.IP, t.RedisPort, "CONFIG", "GET", "appendonly")
+	if err != nil {
+		return false, err
+	}
+	if rc != 0 {
+		return false, fmt.Errorf("CONFIG GET appendonly exited with code %d: %s", rc, strings.TrimSpace(stderr))
+	}
+	fields := strings.Fields(stdout)
+	for index := 0; index+1 < len(fields); index++ {
+		if strings.EqualFold(fields[index], "appendonly") {
+			switch strings.ToLower(fields[index+1]) {
+			case "yes":
+				return true, nil
+			case "no":
+				return false, nil
+			default:
+				return false, fmt.Errorf("unexpected appendonly value %q", fields[index+1])
+			}
+		}
+	}
+	return false, fmt.Errorf("CONFIG GET appendonly returned no value")
+}
+
+// ServerInfo returns INFO server using the caller's reconcile deadline.
+func (t *Toolbox) ServerInfo(ctx context.Context, node *ClusterNode) (string, error) {
+	if err := t.validate(); err != nil {
+		return "", err
+	}
+	if err := validateClusterNode(node); err != nil {
+		return "", err
+	}
+	rc, stdout, stderr, err := t.runRedis(ctx, node.IP, t.RedisPort, "INFO", "server")
+	if err != nil {
+		return "", err
+	}
+	if rc != 0 {
+		return "", fmt.Errorf("INFO server exited with code %d: %s", rc, strings.TrimSpace(stderr))
+	}
+	return stdout, nil
+}
+
 func (t *Toolbox) LastSave(node *ClusterNode) (int, string, string, error) {
 	if err := t.validate(); err != nil {
 		return 0, "", "", err
@@ -802,13 +851,18 @@ func (t *Toolbox) BGSave(node *ClusterNode) (int, string, string, error) {
 }
 
 func (t *Toolbox) ShutdownNoSave(node *ClusterNode) (int, string, string, error) {
+	return t.ShutdownNoSaveContext(t.ctx, node)
+}
+
+// ShutdownNoSaveContext stops Redis without writing over an activated restore artifact.
+func (t *Toolbox) ShutdownNoSaveContext(ctx context.Context, node *ClusterNode) (int, string, string, error) {
 	if err := t.validate(); err != nil {
 		return 0, "", "", err
 	}
 	if err := validateClusterNode(node); err != nil {
 		return 0, "", "", err
 	}
-	return t.runRedis(t.ctx, node.IP, t.RedisPort, "SHUTDOWN", "NOSAVE")
+	return t.runRedis(ctx, node.IP, t.RedisPort, "SHUTDOWN", "NOSAVE")
 }
 
 func (t *Toolbox) countOperation(name string) {
