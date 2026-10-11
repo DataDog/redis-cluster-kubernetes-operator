@@ -1,5 +1,7 @@
-redis-cluster-kubernetes-operator
-Copyright 2026 Datadog, Inc.
+Datadog redis-cluster-kubernetes-operator
+Copyright 2026-Present Datadog, Inc.
 
-This product includes software developed by third parties. Production Go
-module dependencies and their licenses are listed in LICENSE-3rdparty.csv.
+This product includes software developed at Datadog (https://www.datadoghq.com/).
+
+Third-party Go module dependencies and their attribution are listed in
+LICENSE-3rdparty.csv.

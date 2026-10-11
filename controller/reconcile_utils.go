@@ -526,21 +526,30 @@ func findReplicaPrimaryPair(cluster *redis_cluster.Cluster, targetPodCount int, 
 
 // retryRefreshClusterUntil refreshes the cluster and tests it until the test passes or the timeout is reached.
 func (r *RedisClusterReconciler) retryRefreshClusterUntil(ctx context.Context, cluster *redis_cluster.Cluster, test func(c *redis_cluster.Cluster) bool, wait time.Duration, timeout time.Duration) (*redis_cluster.Cluster, bool) {
-	start := time.Now()
+	deadline := time.Now().Add(timeout)
+	current := cluster
 	for {
 		c, err := r.refreshCluster(ctx, cluster)
 		if err != nil {
-			r.Log.Error(err, "Failed to refresh the cluster")
-			return cluster, false
+			r.Log.Error(err, "Failed to refresh the cluster, will retry")
+		} else {
+			current = c
+			if test(c) {
+				return c, true
+			}
 		}
-		if test(c) {
-			return c, true
-		}
-		if time.Since(start) > timeout {
-			return c, false
+		if !time.Now().Before(deadline) {
+			return current, false
 		}
 		r.Log.Info("Condition not met, will retry")
-		time.Sleep(wait)
+		delay := min(wait, time.Until(deadline))
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return current, false
+		case <-timer.C:
+		}
 	}
 }
 
