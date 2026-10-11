@@ -113,7 +113,8 @@ func mergeRedisNodes(t *Toolbox, nodes []*ClusterNode) ([]*ClusterNode, error) {
 	var response strings.Builder
 	clusterViews := 0
 	for _, node := range nodes {
-		rc, info, _, err := t.ClusterInfo(ctx, node.IP)
+		nodeCtx, cancelNode := context.WithTimeout(ctx, clusterViewPerNodeTimeout)
+		rc, info, _, err := t.ClusterInfo(nodeCtx, node.IP)
 		if err == nil && rc != 0 {
 			err = fmt.Errorf("command exit code was %d", rc)
 		}
@@ -122,6 +123,7 @@ func mergeRedisNodes(t *Toolbox, nodes []*ClusterNode) ([]*ClusterNode, error) {
 		}
 		if err != nil {
 			if ctx.Err() != nil {
+				cancelNode()
 				return nil, utils.WrapErr(ctx.Err(), "failed to get Redis info before cluster-view deadline")
 			}
 			t.Log.Info("Redis INFO unavailable; retaining pod in partial cluster view", "podName", node.PodName, "podIP", node.IP, "err", err)
@@ -133,7 +135,7 @@ func mergeRedisNodes(t *Toolbox, nodes []*ClusterNode) ([]*ClusterNode, error) {
 		}
 		response.WriteString("PONG\n")
 
-		rc, clusterNodes, _, err := t.runRedis(ctx, node.IP, t.RedisPort, "CLUSTER", "NODES")
+		rc, clusterNodes, _, err := t.runRedis(nodeCtx, node.IP, t.RedisPort, "CLUSTER", "NODES")
 		if err == nil && rc != 0 {
 			err = fmt.Errorf("command exit code was %d", rc)
 		}
@@ -145,6 +147,7 @@ func mergeRedisNodes(t *Toolbox, nodes []*ClusterNode) ([]*ClusterNode, error) {
 		}
 		if err != nil {
 			if ctx.Err() != nil {
+				cancelNode()
 				return nil, utils.WrapErr(ctx.Err(), "failed to get Redis nodes before cluster-view deadline")
 			}
 			t.Log.Info("Redis CLUSTER NODES unavailable; retaining pod in partial cluster view", "podName", node.PodName, "podIP", node.IP, "err", err)
@@ -156,6 +159,7 @@ func mergeRedisNodes(t *Toolbox, nodes []*ClusterNode) ([]*ClusterNode, error) {
 			}
 		}
 		response.WriteString("PONG\n")
+		cancelNode()
 	}
 	if clusterViews == 0 {
 		return nil, fmt.Errorf("no Redis process returned a usable CLUSTER NODES view")
