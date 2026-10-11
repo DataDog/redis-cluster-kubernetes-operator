@@ -762,10 +762,6 @@ func (cc *ClusterClient) DeleteGreenResources(ctx context.Context, redisCluster 
 			return err
 		}
 		ownedStatefulSet = true
-		cc.Log.Info("Deleting green StatefulSet", "name", greenSTSName)
-		if err := cc.Delete(ctx, sts); err != nil && !errors.IsNotFound(err) {
-			return utils.WrapErr(err, "failed to delete green StatefulSet")
-		}
 	} else if !errors.IsNotFound(err) {
 		return utils.WrapErr(err, "failed to get green StatefulSet before deletion")
 	}
@@ -786,15 +782,24 @@ func (cc *ClusterClient) DeleteGreenResources(ctx context.Context, redisCluster 
 				if greenPVCPattern.MatchString(pvcList.Items[i].Name) {
 					cc.Log.Info("Deleting green PVC during rollback", "pvc", pvcList.Items[i].Name)
 					if err := cc.Delete(ctx, &pvcList.Items[i]); err != nil && !errors.IsNotFound(err) {
-						cc.Log.Error(err, "Failed to delete green PVC (non-fatal)", "pvc", pvcList.Items[i].Name)
-					} else {
-						deleted++
+						return utils.WrapErr(err, "failed to delete green PVC before StatefulSet")
 					}
+					deleted++
 				}
 			}
 			if deleted > 0 {
 				cc.Log.Info("Deleted green PVCs during rollback", "count", deleted)
 			}
+		}
+	}
+
+	// Keep the owned StatefulSet as ownership evidence until every retained PVC
+	// has been accepted for deletion. A retry after a partial failure can then
+	// safely identify and clean the remaining green claims.
+	if ownedStatefulSet {
+		cc.Log.Info("Deleting green StatefulSet", "name", greenSTSName)
+		if err := cc.Delete(ctx, sts); err != nil && !errors.IsNotFound(err) {
+			return utils.WrapErr(err, "failed to delete green StatefulSet")
 		}
 	}
 
@@ -888,7 +893,11 @@ func (cc *ClusterClient) getRedisPort(ctx context.Context, redisCluster *cachev1
 	if found {
 		for _, port := range svc.Spec.Ports {
 			if port.Name == "redis-server" || port.Name == "redis" {
-				redisPort = int(port.Port)
+				resolvedPort, err := resolveRedisTargetPort(redisCluster, port)
+				if err != nil {
+					return 0, err
+				}
+				redisPort = resolvedPort
 				break
 			}
 		}
@@ -897,4 +906,26 @@ func (cc *ClusterClient) getRedisPort(ctx context.Context, redisCluster *cachev1
 	}
 
 	return redisPort, nil
+}
+
+func resolveRedisTargetPort(redisCluster *cachev1.RedisCluster, servicePort corev1.ServicePort) (int, error) {
+	if servicePort.TargetPort.IntVal > 0 {
+		return int(servicePort.TargetPort.IntVal), nil
+	}
+	if servicePort.TargetPort.StrVal == "" {
+		return int(servicePort.Port), nil
+	}
+
+	targetName := servicePort.TargetPort.StrVal
+	podSpec := redisCluster.Spec.StatefulsetTemplate.Spec.Template.Spec
+	for _, containers := range [][]corev1.Container{podSpec.InitContainers, podSpec.Containers} {
+		for _, container := range containers {
+			for _, containerPort := range container.Ports {
+				if containerPort.Name == targetName {
+					return int(containerPort.ContainerPort), nil
+				}
+			}
+		}
+	}
+	return 0, fmt.Errorf("Redis Service targetPort %q does not match a Pod container port", targetName)
 }

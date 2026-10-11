@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -287,4 +288,61 @@ func TestGetRedisPortAcceptsDocumentedServicePortName(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 6380, port)
+}
+
+func TestGetRedisPortUsesNumericTargetPortForDirectPodConnections(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "default"},
+		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{
+			Name:       "redis",
+			Port:       6380,
+			TargetPort: intstr.FromInt32(6379),
+		}}},
+	}
+	clusterClient := &ClusterClient{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(service).Build(),
+		Log:    logr.Discard(),
+	}
+
+	port, err := clusterClient.getRedisPort(context.Background(), &cachev1.RedisCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "default"},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 6379, port)
+}
+
+func TestGetRedisPortResolvesNamedTargetPortFromPodTemplate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "default"},
+		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{
+			Name:       "redis",
+			Port:       6380,
+			TargetPort: intstr.FromString("redis-internal"),
+		}}},
+	}
+	clusterClient := &ClusterClient{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(service).Build(),
+		Log:    logr.Discard(),
+	}
+	redisCluster := &cachev1.RedisCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "default"},
+		Spec: cachev1.RedisClusterSpec{StatefulsetTemplate: appsv1.StatefulSet{
+			Spec: appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:  "redis",
+					Ports: []corev1.ContainerPort{{Name: "redis-internal", ContainerPort: 6379}},
+				}}},
+			}},
+		}},
+	}
+
+	port, err := clusterClient.getRedisPort(context.Background(), redisCluster)
+
+	require.NoError(t, err)
+	assert.Equal(t, 6379, port)
 }
