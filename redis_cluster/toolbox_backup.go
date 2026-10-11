@@ -18,6 +18,7 @@ const nodesConfSanitizer = `s/([0-9]+\.){3}[0-9]+/0.42.42.42/g`
 
 const (
 	dumpRDBPath         = redisDataDirectory + "/dump.rdb"
+	dumpRDBBackupPath   = redisDataDirectory + "/dump.rdb.backup"
 	nodesConfPath       = redisDataDirectory + "/nodes.conf"
 	nodesConfBackupPath = redisDataDirectory + "/nodes.conf.backup"
 	stagedDumpPath      = redisDataDirectory + "/dump.rdb.restore"
@@ -30,6 +31,7 @@ type BackupFile uint8
 
 const (
 	BackupFileDumpRDB BackupFile = iota + 1
+	BackupFileDumpRDBBackup
 	BackupFileNodesConfBackup
 	BackupFileStagedDump
 	BackupFileStagedNodesConf
@@ -41,6 +43,8 @@ func (file BackupFile) Path() (string, error) {
 	switch file {
 	case BackupFileDumpRDB:
 		return dumpRDBPath, nil
+	case BackupFileDumpRDBBackup:
+		return dumpRDBBackupPath, nil
 	case BackupFileNodesConfBackup:
 		return nodesConfBackupPath, nil
 	case BackupFileStagedDump:
@@ -50,6 +54,13 @@ func (file BackupFile) Path() (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported backup file %d", file)
 	}
+}
+
+// PrepareDumpRDBBackup snapshots dump.rdb to an operator-owned fixed path so
+// hashing and upload always read the same immutable file.
+func (t *Toolbox) PrepareDumpRDBBackup(node *ClusterNode) error {
+	_, err := t.execBackupFileCommand(t.Context(), node, []string{"cp", "--", dumpRDBPath, dumpRDBBackupPath})
+	return err
 }
 
 func (t *Toolbox) execBackupFileCommand(ctx context.Context, node *ClusterNode, command []string) (string, error) {

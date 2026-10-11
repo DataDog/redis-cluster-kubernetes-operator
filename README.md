@@ -125,6 +125,9 @@ Backups are beta and must remain disabled unless all prerequisites are supplied:
 - Set `backup.bucketName` and `spec.backupBackend` to `s3`, `gcs`, or `azure`.
 - Add a `backup` sidecar to the Redis StatefulSet template with the corresponding `aws`, `gcloud`, or `az` CLI and cloud identity/credentials.
 - Mount the Redis data volume at the same path in the Redis and backup containers.
+- Configure Redis with `appendonly no` before using RDB restore. The operator
+  rejects restore before activation when AOF is enabled because Redis would load
+  the AOF instead of the validated `dump.rdb`.
 - Grant the workload identity permission to read, write, copy, list, and delete objects in the selected bucket or container.
 - Complete the required security review of toolbox, authentication, backup artifact integrity, and credential handling.
 

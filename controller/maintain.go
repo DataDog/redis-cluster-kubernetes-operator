@@ -518,23 +518,39 @@ func (r *RedisClusterReconciler) findNodesWithUnassignedSlots(cluster *redis_clu
 	return nodes
 }
 
+func (r *RedisClusterReconciler) prepareLostSlotRestore(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, path string) (map[int]string, map[stagedArtifactKey]stagedBackupArtifact, error) {
+	coverage, manifest, err := r.backupSlotCoverage(cluster, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	staged, err := r.stageRestoreArtifacts(ctx, cluster, backend, path, manifest)
+	if err != nil {
+		return nil, nil, err
+	}
+	return coverage, staged, nil
+}
+
 // recoverLostSlots brings slotless primaries back from backup: a node that still holds its
 // data re-claims its slots from the manifest (ADDSLOTS never flushes keys); an empty node is
 // restored from dump.rdb and re-owns next reconcile. Bounds the keys-only restore loop.
 func (r *RedisClusterReconciler) recoverLostSlots(ctx context.Context, cluster *redis_cluster.Cluster, affected []*redis_cluster.ClusterNode, log logr.Logger) (*redis_cluster.Cluster, error) {
 	latestPath := r.latestBackupPath(cluster)
 	previousPath := r.previousBackupPath(cluster)
-	coverage, manifest, coverageErr := r.backupSlotCoverage(cluster, latestPath)
-	if coverageErr != nil {
-		return cluster, utils.WrapErr(coverageErr, "refusing lost-slot recovery from invalid backup manifest")
-	}
 	backend, backendErr := r.backupBackend(cluster)
 	if backendErr != nil {
 		return cluster, backendErr
 	}
-	staged, validationErr := r.stageRestoreArtifacts(ctx, cluster, backend, latestPath, manifest)
-	if validationErr != nil {
-		return cluster, utils.WrapErr(validationErr, "refusing lost-slot mutation from missing or corrupt backup artifacts")
+	restorePath := latestPath
+	coverage, staged, latestErr := r.prepareLostSlotRestore(ctx, cluster, backend, latestPath)
+	if latestErr != nil {
+		log.Error(latestErr, "Latest backup is invalid, validating previous before mutation")
+		var previousErr error
+		coverage, staged, previousErr = r.prepareLostSlotRestore(ctx, cluster, backend, previousPath)
+		if previousErr != nil {
+			return cluster, utils.WrapErr(errors.Join(latestErr, previousErr), "no fully validated backup generation is available for lost-slot recovery")
+		}
+		restorePath = previousPath
+		_ = r.Metrics.CountBadSituation("restore_fallback_to_previous")
 	}
 	defer r.cleanupStagedArtifacts(cluster, staged)
 
@@ -564,9 +580,9 @@ func (r *RedisClusterReconciler) recoverLostSlots(ctx context.Context, cluster *
 	}
 
 	if len(needRestore) > 0 {
-		log.Info("Restoring affected nodes from backup", "restorePath", latestPath, "count", len(needRestore))
-		restoreErr := r.restoreStagedNodes(cluster, latestPath, needRestore, staged)
-		if restoreErr != nil {
+		log.Info("Restoring affected nodes from backup", "restorePath", restorePath, "count", len(needRestore))
+		restoreErr := r.restoreStagedNodes(ctx, cluster, restorePath, needRestore, staged)
+		if restoreErr != nil && restorePath == latestPath {
 			log.Error(restoreErr, "Restore from latest failed, trying previous")
 			if prevExists, prevErr := r.backupExists(cluster, previousPath); prevErr == nil && prevExists {
 				if restoreErr = r.restoreNodes(ctx, cluster, previousPath, needRestore); restoreErr == nil {

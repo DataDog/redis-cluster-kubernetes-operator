@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/redis_cluster"
@@ -15,6 +16,22 @@ import (
 
 func clusterWithSpec(spec cachev1.RedisClusterSpec) *redis_cluster.Cluster {
 	return &redis_cluster.Cluster{RedisCluster: &cachev1.RedisCluster{Spec: spec}}
+}
+
+func TestWaitForBackupPollStopsWhenReconciliationIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	err := waitForBackupPoll(ctx, time.Hour)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Less(t, time.Since(started), time.Second)
+}
+
+func TestRedisInfoString(t *testing.T) {
+	info := "# Server\r\nredis_version:8.6.0\r\nrun_id:abc123\r\n"
+	assert.Equal(t, "abc123", redisInfoString(info, "run_id"))
+	assert.Empty(t, redisInfoString(info, "missing"))
 }
 
 func TestBackupBucketIsNotSanitizedIntoAnotherResource(t *testing.T) {
