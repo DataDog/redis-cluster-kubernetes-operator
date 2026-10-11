@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 
@@ -81,12 +80,6 @@ func getReconcileTimeout(podCount int32, overrideSeconds int32) time.Duration {
 
 // Reconcile reconciles the state of the Redis cluster.
 func (r *RedisClustersReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
-
-	// Ensure this really is about a Redis cluster, else quietly ignore the request
-	if !strings.HasPrefix(req.Name, "redis-cluster-") {
-		return ctrl.Result{}, nil
-	}
-
 	// Skip resources recently confirmed as not found to prevent tight reconcile loops
 	// from pod/StatefulSet events targeting non-existent RedisCluster CRs.
 	cacheKey := req.NamespacedName.String()
@@ -156,7 +149,7 @@ func (r *RedisClusterReconciler) reconcile(ctx context.Context, req ctrl.Request
 		if errors.IsNotFound(err) {
 			r.Log.Info("RedisCluster resource not found, ignoring (object must be deleted)")
 			r.notFoundCache.Store(req.NamespacedName.String(), time.Now())
-			return ctrl.Result{}, health.OK, nil
+			return ctrl.Result{}, health.Unknown, nil
 		}
 		r.Log.Error(err, "Failed to get the RedisCluster resource")
 		_ = r.Metrics.CountBadSituation("could_not_get_cluster")
@@ -380,6 +373,11 @@ func (r *RedisClusterReconciler) reconcile(ctx context.Context, req ctrl.Request
 	cluster, err = r.maintainCluster(ctx, cluster)
 	_ = r.Metrics.Timing(metrics.TimingReconcileStep, time.Since(maintainStart).Milliseconds(), metrics.StepTagMaintainCluster)
 	if err != nil {
+		if goerrors.Is(err, errConnectivityRepairPending) {
+			r.Log.Info("Requeueing while Redis connectivity repair converges",
+				"requeueAfter", constants.QuickRequeue.String())
+			return ctrl.Result{RequeueAfter: constants.QuickRequeue}, health.Pending, nil
+		}
 		if goerrors.Is(err, errWaitingForRedisEndpointReady) {
 			r.Log.Info("Requeueing while a Redis member waits for client endpoint readiness",
 				"requeueAfter", constants.QuickRequeue.String())

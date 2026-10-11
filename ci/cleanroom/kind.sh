@@ -18,6 +18,7 @@ readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-cleanroom-kind.XXXXXX")"
 readonly KUBECONFIG_PATH="$TEMP_DIR/kubeconfig"
 readonly RESOURCE_STATE="$TEMP_DIR/resource-state"
 readonly ARTIFACT_DIR="${CLEANROOM_ARTIFACT_DIR:-$REPO_ROOT/cleanroom-artifacts/$RUN_ID}"
+cluster_owned=false
 
 # shellcheck source=common.sh
 source "$REPO_ROOT/ci/cleanroom/common.sh"
@@ -32,7 +33,7 @@ cleanup() {
       echo "WARNING: failure artifact collection did not complete" >&2
     echo "Clean-room failure artifacts: $ARTIFACT_DIR" >&2
   fi
-  if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"; then
+  if [[ "$cluster_owned" == true ]] && command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"; then
     kind delete cluster --name "$CLUSTER_NAME" || cleanup_status=$?
   fi
   rm -f "$KUBECONFIG_PATH" "$TEMP_DIR/kind.yaml" "$RESOURCE_STATE"
@@ -47,6 +48,7 @@ trap cleanup EXIT
 
 cleanroom_validate_run_id "$RUN_ID"
 cleanroom_require_commands docker go helm kind kubectl
+cleanroom_require_kind_version 0 30 0
 "$REPO_ROOT/ci/cleanroom/verify-lanes.sh"
 
 if kind get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"; then
@@ -68,6 +70,8 @@ kind create cluster \
   --image "$KIND_NODE_IMAGE" \
   --config "$TEMP_DIR/kind.yaml" \
   --kubeconfig "$KUBECONFIG_PATH"
+# A failed create can lose a same-name race, so claim ownership only on success.
+cluster_owned=true
 
 export KUBECONFIG="$KUBECONFIG_PATH"
 cleanroom_verify_context "$KUBECONFIG_PATH" "$CONTEXT"
