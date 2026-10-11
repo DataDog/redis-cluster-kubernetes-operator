@@ -116,6 +116,65 @@ func TestComputeRolloutSpecHashIgnoresOperatorManagedRolloutFields(t *testing.T)
 	require.Equal(t, baseline, computeRolloutSpecHashForTemplate(template))
 }
 
+func TestComputeRolloutSpecHashIncludesRestoredSelectorLabels(t *testing.T) {
+	cluster := testHashCluster()
+	cluster.RedisCluster.Spec.StatefulsetTemplate.Spec.Template.Labels = nil
+	cluster.RedisCluster.Spec.StatefulsetTemplate.Spec.Selector = &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"app":                "redis-cluster",
+			"redis_cluster_name": "cache",
+		},
+	}
+
+	liveTemplate := cluster.RedisCluster.Spec.StatefulsetTemplate.Spec.Template.DeepCopy()
+	liveTemplate.Labels = map[string]string{
+		"app":                               "redis-cluster",
+		"redis_cluster_name":                "cache",
+		constants.BlueGreenRoleLabel:        constants.BlueGreenRoleActive,
+		constants.RedisClusterReadyPodLabel: "true",
+	}
+
+	require.Equal(t,
+		computeRolloutSpecHash(cluster),
+		computeRolloutSpecHashForTemplate(*liveTemplate),
+		"selector labels restored by the operator must not trigger an initial rollout",
+	)
+}
+
+func TestRolloutTemplateMatchesLiveIgnoresAPIServerDefaults(t *testing.T) {
+	cluster := testHashCluster()
+	desired := rolloutTemplateForCluster(cluster)
+	desired.Spec.Containers[0].Env = []corev1.EnvVar{{
+		Name: "POD_NAME",
+		ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+			FieldPath: "metadata.name",
+		}},
+	}}
+	desired.Spec.Containers[0].LivenessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{Command: []string{"redis-cli", "ping"}},
+		},
+		PeriodSeconds: 10,
+	}
+
+	live := desired.DeepCopy()
+	gracePeriod := int64(30)
+	live.Spec.RestartPolicy = corev1.RestartPolicyAlways
+	live.Spec.DNSPolicy = corev1.DNSClusterFirst
+	live.Spec.SchedulerName = corev1.DefaultSchedulerName
+	live.Spec.TerminationGracePeriodSeconds = &gracePeriod
+	live.Spec.Containers[0].Env[0].ValueFrom.FieldRef.APIVersion = "v1"
+	live.Spec.Containers[0].TerminationMessagePath = corev1.TerminationMessagePathDefault
+	live.Spec.Containers[0].TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	live.Spec.Containers[0].LivenessProbe.TimeoutSeconds = 1
+	live.Spec.Containers[0].LivenessProbe.SuccessThreshold = 1
+	live.Spec.Containers[0].LivenessProbe.FailureThreshold = 3
+
+	require.True(t, rolloutTemplateMatchesLive(desired, *live))
+	live.Spec.Containers[0].Image = "redis:8.6.0"
+	require.False(t, rolloutTemplateMatchesLive(desired, *live))
+}
+
 func testHashCluster() *redis_cluster.Cluster {
 	replicas := int32(9)
 	return &redis_cluster.Cluster{

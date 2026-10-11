@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +21,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -58,7 +59,17 @@ func (r *RedisClusterReconciler) detectSpecChanges(ctx context.Context, cluster 
 		// Migrate from the legacy full-spec hash using what is actually running.
 		// Initializing from the desired CR would hide a simultaneous scale + image
 		// or config change because scaling only updates StatefulSet replicas.
-		currentHash = computeRolloutSpecHashForTemplate(cluster.StatefulSet.Spec.Template)
+		if rolloutTemplateMatchesLive(
+			rolloutTemplateForCluster(cluster),
+			cluster.StatefulSet.Spec.Template,
+		) {
+			// API servers fill omitted Pod defaults in the live StatefulSet. When
+			// every explicit desired field matches, store the desired hash so those
+			// defaults do not cause a one-time rollout during initial adoption.
+			currentHash = desiredHash
+		} else {
+			currentHash = computeRolloutSpecHashForTemplate(cluster.StatefulSet.Spec.Template)
+		}
 		r.Log.Info("detectSpecChanges: initializing rollout hash from active StatefulSet",
 			"hash", truncateChecksum(currentHash))
 		if err := r.updateRedisClusterStatusWithRetry(ctx, cluster.RedisCluster,
@@ -160,10 +171,33 @@ func computeSpecHash(cluster *redis_cluster.Cluster) string {
 // handleScaling, while backup controls are consumed live from the CR; neither
 // requires replacing Redis pods.
 func computeRolloutSpecHash(cluster *redis_cluster.Cluster) string {
-	return computeRolloutSpecHashForTemplate(cluster.RedisCluster.Spec.StatefulsetTemplate.Spec.Template)
+	return computeRolloutSpecHashForTemplate(rolloutTemplateForCluster(cluster))
+}
+
+func rolloutTemplateForCluster(cluster *redis_cluster.Cluster) corev1.PodTemplateSpec {
+	template := cluster.RedisCluster.Spec.StatefulsetTemplate.Spec.Template.DeepCopy()
+	if template.Labels == nil {
+		template.Labels = make(map[string]string)
+	}
+	if selector := cluster.RedisCluster.Spec.StatefulsetTemplate.Spec.Selector; selector != nil {
+		// The compatibility CRD can prune embedded PodTemplate metadata. The
+		// operator restores selector labels when it creates the StatefulSet, so
+		// include the same labels in the desired hash. Otherwise a new cluster
+		// appears changed as soon as the API server returns the live template and
+		// starts an unnecessary blue/green rollout.
+		maps.Copy(template.Labels, selector.MatchLabels)
+	}
+	return *template
 }
 
 func computeRolloutSpecHashForTemplate(template corev1.PodTemplateSpec) string {
+	normalized := normalizeRolloutTemplate(template)
+	data, _ := json.Marshal(normalized)
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum)
+}
+
+func normalizeRolloutTemplate(template corev1.PodTemplateSpec) corev1.PodTemplateSpec {
 	normalized := template.DeepCopy()
 	labels := make(map[string]string, len(normalized.Labels))
 	for key, value := range normalized.Labels {
@@ -188,15 +222,54 @@ func computeRolloutSpecHashForTemplate(template corev1.PodTemplateSpec) string {
 		}
 	}
 
-	// Apply the same Kubernetes defaults to the embedded desired template and
-	// the API-server-persisted StatefulSet template before comparing them.
-	pod := &corev1.Pod{Spec: normalized.Spec}
-	clientgoscheme.Scheme.Default(pod)
-	normalized.Spec = pod.Spec
+	return *normalized
+}
 
-	data, _ := json.Marshal(normalized)
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum)
+func rolloutTemplateMatchesLive(desired, live corev1.PodTemplateSpec) bool {
+	var desiredJSON, liveJSON any
+	desiredData, err := json.Marshal(normalizeRolloutTemplate(desired))
+	if err != nil || json.Unmarshal(desiredData, &desiredJSON) != nil {
+		return false
+	}
+	liveData, err := json.Marshal(normalizeRolloutTemplate(live))
+	if err != nil || json.Unmarshal(liveData, &liveJSON) != nil {
+		return false
+	}
+	return jsonValueIsSubset(desiredJSON, liveJSON)
+}
+
+// jsonValueIsSubset compares the JSON shape submitted by the user with the
+// API-server-persisted shape. Extra object fields in live are Kubernetes
+// defaults; arrays remain exact so removing a container, volume, argument, or
+// environment variable is still detected during hash migration.
+func jsonValueIsSubset(desired, live any) bool {
+	switch desiredValue := desired.(type) {
+	case map[string]any:
+		liveValue, ok := live.(map[string]any)
+		if !ok {
+			return false
+		}
+		for key, value := range desiredValue {
+			liveField, found := liveValue[key]
+			if !found || !jsonValueIsSubset(value, liveField) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		liveValue, ok := live.([]any)
+		if !ok || len(desiredValue) != len(liveValue) {
+			return false
+		}
+		for index := range desiredValue {
+			if !jsonValueIsSubset(desiredValue[index], liveValue[index]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(desired, live)
+	}
 }
 
 // truncateChecksum returns first 8 chars of checksum for logging (or "empty" if empty)
