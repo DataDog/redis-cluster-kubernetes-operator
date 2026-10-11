@@ -137,7 +137,29 @@ func (r *RedisClusterReconciler) backup(ctx context.Context, cluster *redis_clus
 }
 
 func (r *RedisClusterReconciler) backupForBlueGreen(ctx context.Context, cluster *redis_cluster.Cluster) (bool, error) {
-	return r.backupWithOptions(ctx, cluster, true)
+	backupCluster, err := blueGreenBackupCluster(cluster)
+	if err != nil {
+		return false, err
+	}
+	return r.backupWithOptions(ctx, backupCluster, true)
+}
+
+func blueGreenBackupCluster(cluster *redis_cluster.Cluster) (*redis_cluster.Cluster, error) {
+	backupCluster := *cluster
+	backupCluster.AllNodes = make([]*redis_cluster.ClusterNode, 0, len(cluster.AllNodes))
+	for _, node := range cluster.AllNodes {
+		// GetBlueOnlyCluster can retain green members learned through Redis
+		// gossip. Those entries have no backing blue pod and must never become
+		// backup artifacts.
+		if node.PodIndex < 0 || node.PodName == "" || node.IP == "" {
+			continue
+		}
+		backupCluster.AllNodes = append(backupCluster.AllNodes, node)
+	}
+	if len(backupCluster.AllNodes) == 0 {
+		return nil, fmt.Errorf("blue-green safety backup has no pod-backed blue nodes")
+	}
+	return &backupCluster, nil
 }
 
 func (r *RedisClusterReconciler) backupWithOptions(ctx context.Context, cluster *redis_cluster.Cluster, forceBlueGreenSafetyBackup bool) (bool, error) {
@@ -1025,6 +1047,11 @@ type stagedArtifactKey struct {
 	kind    string
 }
 
+type restoreArtifactTarget struct {
+	sourceOrdinal int
+	target        *redis_cluster.ClusterNode
+}
+
 func backupFileForArtifact(artifact BackupArtifact) redis_cluster.BackupFile {
 	if artifact.Kind == backupArtifactNodes {
 		return redis_cluster.BackupFileStagedNodesConf
@@ -1113,7 +1140,52 @@ func (r *RedisClusterReconciler) stageRestoreArtifacts(ctx context.Context, clus
 		entry := stagedBackupArtifact{artifact: artifact, node: node, file: file}
 		staged[stagedArtifactKey{ordinal: artifact.Ordinal, kind: artifact.Kind}] = entry
 	}
+	return r.stagePlannedRestoreArtifacts(ctx, cluster, backend, restorePath, staged)
+}
 
+func planMappedRDBRestore(manifest *BackupManifest, targets []restoreArtifactTarget) (map[stagedArtifactKey]stagedBackupArtifact, error) {
+	rdbBySource := make(map[int]BackupArtifact, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Kind != backupArtifactRDB {
+			continue
+		}
+		if _, exists := rdbBySource[artifact.Ordinal]; exists {
+			return nil, fmt.Errorf("manifest has duplicate RDB artifact for source ordinal %d", artifact.Ordinal)
+		}
+		rdbBySource[artifact.Ordinal] = artifact
+	}
+
+	staged := make(map[stagedArtifactKey]stagedBackupArtifact, len(targets))
+	for _, assignment := range targets {
+		if assignment.target == nil || assignment.target.PodIndex < 0 || assignment.target.PodName == "" {
+			return nil, fmt.Errorf("source ordinal %d has no pod-backed restore target", assignment.sourceOrdinal)
+		}
+		artifact, exists := rdbBySource[assignment.sourceOrdinal]
+		if !exists {
+			return nil, fmt.Errorf("manifest has no RDB artifact for source ordinal %d", assignment.sourceOrdinal)
+		}
+		key := stagedArtifactKey{ordinal: assignment.target.PodIndex, kind: backupArtifactRDB}
+		if _, exists := staged[key]; exists {
+			return nil, fmt.Errorf("multiple source shards target restore ordinal %d", assignment.target.PodIndex)
+		}
+		staged[key] = stagedBackupArtifact{
+			artifact: artifact,
+			node:     assignment.target,
+			file:     redis_cluster.BackupFileStagedDump,
+		}
+	}
+	return staged, nil
+}
+
+func (r *RedisClusterReconciler) stageMappedRDBRestoreArtifacts(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, restorePath string, manifest *BackupManifest, targets []restoreArtifactTarget) (map[stagedArtifactKey]stagedBackupArtifact, error) {
+	staged, err := planMappedRDBRestore(manifest, targets)
+	if err != nil {
+		return nil, err
+	}
+	return r.stagePlannedRestoreArtifacts(ctx, cluster, backend, restorePath, staged)
+}
+
+func (r *RedisClusterReconciler) stagePlannedRestoreArtifacts(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, restorePath string, staged map[stagedArtifactKey]stagedBackupArtifact) (map[stagedArtifactKey]stagedBackupArtifact, error) {
 	eg, stageCtx := errgroup.WithContext(ctx)
 	eg.SetLimit(restoreStageLimit)
 	for _, entry := range staged {

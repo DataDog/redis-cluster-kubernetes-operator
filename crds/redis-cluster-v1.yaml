@@ -9458,6 +9458,11 @@ spec:
                   - slots
                   type: object
                 type: array
+              restore_path:
+                description: |-
+                  RestorePath records the backup generation selected for the current restore
+                  so topology reconstruction uses the same generation across reconciles.
+                type: string
               restore_topology_pending:
                 description: |-
                   RestoreTopologyPending limits manifest-guided slot reconstruction to the

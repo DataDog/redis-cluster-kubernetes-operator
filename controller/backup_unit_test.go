@@ -52,12 +52,42 @@ func TestRestoreStagedNodesRejectsMissingTargetArtifactBeforeMutation(t *testing
 	require.EqualError(t, err, "manifest has no RDB artifact for restore target ordinal 1")
 }
 
+func TestPlanMappedRDBRestoreCarriesSourceArtifactToSelectedTarget(t *testing.T) {
+	target := &redis_cluster.ClusterNode{PodIndex: 3, PodName: "cache-3"}
+	manifest := &BackupManifest{Artifacts: []BackupArtifact{
+		{Ordinal: 0, Kind: backupArtifactRDB, ObjectKey: "0/dump.rdb", SHA256: "source-digest"},
+		{Ordinal: 3, Kind: backupArtifactRDB, ObjectKey: "3/dump.rdb", SHA256: "target-digest"},
+	}}
+
+	staged, err := planMappedRDBRestore(manifest, []restoreArtifactTarget{{
+		sourceOrdinal: 0,
+		target:        target,
+	}})
+
+	require.NoError(t, err)
+	entry, exists := staged[stagedArtifactKey{ordinal: 3, kind: backupArtifactRDB}]
+	require.True(t, exists)
+	assert.Equal(t, 0, entry.artifact.Ordinal)
+	assert.Equal(t, "0/dump.rdb", entry.artifact.ObjectKey)
+	assert.Same(t, target, entry.node)
+	assert.Equal(t, redis_cluster.BackupFileStagedDump, entry.file)
+}
+
+func TestPlanMappedRDBRestoreRejectsMissingSourceArtifact(t *testing.T) {
+	_, err := planMappedRDBRestore(&BackupManifest{}, []restoreArtifactTarget{{
+		sourceOrdinal: 2,
+		target:        &redis_cluster.ClusterNode{PodIndex: 3, PodName: "cache-3"},
+	}})
+	require.ErrorContains(t, err, "no RDB artifact for source ordinal 2")
+}
+
 func TestBlueGreenSafetyBackupRequiresWaitingSyncAndBypassesSchedule(t *testing.T) {
 	r := &RedisClusterReconciler{ClusterClient: redis_cluster.ClusterClient{Metrics: metrics.CreateNoop()}}
 	cluster := clusterWithSpec(cachev1.RedisClusterSpec{
 		BackupEnabled:   true,
 		BackupFrequency: 3600,
 	})
+	cluster.AllNodes = []*redis_cluster.ClusterNode{{PodIndex: 0, PodName: "cache-0", IP: "10.0.0.1"}}
 	cluster.RedisCluster.Status.LastBackupTime = time.Now().Unix()
 	cluster.RedisCluster.Status.BlueGreen.Phase = cachev1.BlueGreenPhasePromoting
 
@@ -67,6 +97,23 @@ func TestBlueGreenSafetyBackupRequiresWaitingSyncAndBypassesSchedule(t *testing.
 	cluster.RedisCluster.Status.BlueGreen.Phase = cachev1.BlueGreenPhaseWaitingSync
 	_, err = r.backupForBlueGreen(context.Background(), cluster)
 	require.ErrorContains(t, err, "no backup bucket configured")
+}
+
+func TestBlueGreenBackupClusterExcludesGossipOnlyMembers(t *testing.T) {
+	blue := &redis_cluster.ClusterNode{PodIndex: 0, PodName: "cache-0", IP: "10.0.0.1"}
+	gossipOnly := &redis_cluster.ClusterNode{PodIndex: -1}
+	cluster := &redis_cluster.Cluster{AllNodes: []*redis_cluster.ClusterNode{blue, gossipOnly}}
+
+	backupCluster, err := blueGreenBackupCluster(cluster)
+
+	require.NoError(t, err)
+	require.Equal(t, []*redis_cluster.ClusterNode{blue}, backupCluster.AllNodes)
+	require.Len(t, cluster.AllNodes, 2, "filtering must not mutate the reconciliation topology")
+}
+
+func TestBlueGreenBackupClusterRequiresPodBackedNode(t *testing.T) {
+	_, err := blueGreenBackupCluster(&redis_cluster.Cluster{AllNodes: []*redis_cluster.ClusterNode{{PodIndex: -1}}})
+	require.ErrorContains(t, err, "no pod-backed blue nodes")
 }
 
 func TestBackupBucketIsNotSanitizedIntoAnotherResource(t *testing.T) {

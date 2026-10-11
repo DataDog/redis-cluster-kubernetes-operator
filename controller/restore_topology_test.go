@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
@@ -24,6 +25,15 @@ func TestIsClusterAlreadyFormedDuringPendingRestore(t *testing.T) {
 	assert.True(t, reconciler.isClusterAlreadyFormed(cluster))
 }
 
+func TestRestorePathForClusterPreservesSelectedGeneration(t *testing.T) {
+	cluster := &redis_cluster.Cluster{RedisCluster: &cachev1.RedisCluster{}}
+	cluster.RedisCluster.Status.RestorePath = "cache/previous"
+	assert.Equal(t, "cache/previous", restorePathForCluster(cluster))
+
+	cluster.RedisCluster.Spec.RestoreFrom = "manual/backup"
+	assert.Equal(t, "manual/backup", restorePathForCluster(cluster))
+}
+
 func TestReconcileRestoredSlotOwnershipRequiresPendingRestore(t *testing.T) {
 	cluster := restoredTopologyTestCluster(
 		restoredPrimary(0, redis_cluster.SlotsRange{First: 0, Last: 16383}),
@@ -31,7 +41,7 @@ func TestReconcileRestoredSlotOwnershipRequiresPendingRestore(t *testing.T) {
 	cluster.RedisCluster = &cachev1.RedisCluster{}
 	cluster.RedisCluster.Status.BackupRestored = true
 
-	updated, err := (&RedisClusterReconciler{}).reconcileRestoredSlotOwnership(cluster, logr.Discard())
+	updated, err := (&RedisClusterReconciler{}).reconcileRestoredSlotOwnership(context.Background(), cluster, logr.Discard())
 
 	require.NoError(t, err)
 	assert.False(t, updated)
@@ -47,7 +57,7 @@ func TestReconcileRestoredSlotOwnershipClearsPendingAfterConvergence(t *testing.
 	cluster.RedisCluster.Status.BackupRestored = true
 	cluster.RedisCluster.Status.RestoreTopologyPending = true
 
-	updated, err := (&RedisClusterReconciler{}).reconcileRestoredSlotOwnership(cluster, logr.Discard())
+	updated, err := (&RedisClusterReconciler{}).reconcileRestoredSlotOwnership(context.Background(), cluster, logr.Discard())
 
 	require.NoError(t, err)
 	assert.False(t, updated)

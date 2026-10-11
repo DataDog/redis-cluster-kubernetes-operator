@@ -203,7 +203,7 @@ func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *r
 		// from the backup manifest before assignAllSlots gets a chance to spread them
 		// across every temporary primary. The latter creates excess, data-bearing
 		// primaries that cannot be reset or turned into replicas.
-		restoredSlotsUpdated, restoredSlotsErr := r.reconcileRestoredSlotOwnership(cluster, log)
+		restoredSlotsUpdated, restoredSlotsErr := r.reconcileRestoredSlotOwnership(ctx, cluster, log)
 		if restoredSlotsErr != nil {
 			return cluster, restoredSlotsErr
 		}
@@ -482,16 +482,15 @@ func assignAllSlots(ctx context.Context, cluster *redis_cluster.Cluster, primary
 	return true, true, nil
 }
 
-func (r *RedisClusterReconciler) prepareLostSlotRestore(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, path string) (map[int]string, map[stagedArtifactKey]stagedBackupArtifact, error) {
+func (r *RedisClusterReconciler) prepareLostSlotRestore(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, path string) (map[int]string, *BackupManifest, error) {
 	coverage, manifest, err := r.backupSlotCoverage(cluster, path)
 	if err != nil {
 		return nil, nil, err
 	}
-	staged, err := r.stageRestoreArtifacts(ctx, cluster, backend, path, manifest)
-	if err != nil {
+	if err := r.validateBackupArtifacts(ctx, cluster, backend, path, manifest); err != nil {
 		return nil, nil, err
 	}
-	return coverage, staged, nil
+	return coverage, manifest, nil
 }
 
 // recoverLostSlots reconstructs every missing part of each manifest shard. A
@@ -505,25 +504,25 @@ func (r *RedisClusterReconciler) recoverLostSlots(ctx context.Context, cluster *
 		return cluster, backendErr
 	}
 	restorePath := latestPath
-	coverage, staged, latestErr := r.prepareLostSlotRestore(ctx, cluster, backend, latestPath)
+	coverage, manifest, latestErr := r.prepareLostSlotRestore(ctx, cluster, backend, latestPath)
 	if latestErr != nil {
 		log.Error(latestErr, "Latest backup is invalid, validating previous before mutation")
 		var previousErr error
-		coverage, staged, previousErr = r.prepareLostSlotRestore(ctx, cluster, backend, previousPath)
+		coverage, manifest, previousErr = r.prepareLostSlotRestore(ctx, cluster, backend, previousPath)
 		if previousErr != nil {
 			return cluster, utils.WrapErr(errors.Join(latestErr, previousErr), "no fully validated backup generation is available for lost-slot recovery")
 		}
 		restorePath = previousPath
 		_ = r.Metrics.CountBadSituation("restore_fallback_to_previous")
 	}
-	defer r.cleanupStagedArtifacts(cluster, staged)
 
 	plans, planErr := planRestoredSlotOwnership(cluster, coverage)
 	if planErr != nil {
 		return cluster, utils.WrapErr(planErr, "refusing ambiguous lost-slot recovery")
 	}
 	var needRestore []*redis_cluster.ClusterNode
-	reowned := 0
+	var restoreTargets []restoreArtifactTarget
+	var reownPlans []restoredShardPlan
 	for _, plan := range plans {
 		if len(plan.missing) == 0 {
 			continue
@@ -534,8 +533,27 @@ func (r *RedisClusterReconciler) recoverLostSlots(ctx context.Context, cluster *
 		}
 		if dbsize == 0 {
 			needRestore = append(needRestore, plan.target)
+			restoreTargets = append(restoreTargets, restoreArtifactTarget{
+				sourceOrdinal: plan.sourcePodIndex,
+				target:        plan.target,
+			})
 			continue
 		}
+		reownPlans = append(reownPlans, plan)
+	}
+
+	var staged map[stagedArtifactKey]stagedBackupArtifact
+	if len(restoreTargets) > 0 {
+		var stageErr error
+		staged, stageErr = r.stageMappedRDBRestoreArtifacts(ctx, cluster, backend, restorePath, manifest, restoreTargets)
+		if stageErr != nil {
+			return cluster, utils.WrapErr(stageErr, "failed to stage mapped lost-slot restore before topology mutation")
+		}
+		defer r.cleanupStagedArtifacts(cluster, staged)
+	}
+
+	reowned := 0
+	for _, plan := range reownPlans {
 		for _, slots := range plan.missing {
 			if err := cluster.Toolbox.AddSlots(plan.target, slots.First, slots.Last); err != nil {
 				return cluster, utils.WrapErr(err, fmt.Sprintf("failed to re-own slots %d-%d on pod %s", slots.First, slots.Last, plan.target.PodName))
@@ -599,7 +617,7 @@ type restoredShardPlan struct {
 // restore can have one such canary slot per shard). If a shard has no owned
 // slots, its source primary pod index from the manifest is the deterministic
 // fallback. A trusted manifest is never applied when ownership is ambiguous.
-func (r *RedisClusterReconciler) reconcileRestoredSlotOwnership(cluster *redis_cluster.Cluster, log logr.Logger) (bool, error) {
+func (r *RedisClusterReconciler) reconcileRestoredSlotOwnership(ctx context.Context, cluster *redis_cluster.Cluster, log logr.Logger) (bool, error) {
 	if !cluster.RedisCluster.Status.BackupRestored ||
 		!cluster.RedisCluster.Status.RestoreTopologyPending {
 		return false, nil
@@ -620,9 +638,19 @@ func (r *RedisClusterReconciler) reconcileRestoredSlotOwnership(cluster *redis_c
 		return false, nil
 	}
 
-	restorePath := cluster.RedisCluster.Spec.RestoreFrom
+	restorePath := restorePathForCluster(cluster)
 	if restorePath == "" && cluster.RedisCluster.Spec.BackupEnabled {
-		restorePath = r.latestBackupPath(cluster)
+		var selectErr error
+		restorePath, selectErr = r.selectAutomaticRestorePath(ctx, cluster)
+		if selectErr != nil {
+			return false, utils.WrapErr(selectErr, "failed to recover selected restore generation")
+		}
+		if restorePath != "" {
+			cluster.RedisCluster.Status.RestorePath = restorePath
+			if err := r.updateRedisCluster(ctx, cluster.RedisCluster); err != nil {
+				return false, utils.WrapErr(err, "failed to persist selected restore generation")
+			}
+		}
 	}
 	if restorePath == "" {
 		return false, nil
@@ -1409,10 +1437,17 @@ func getHealthyRefNode(cluster *redis_cluster.Cluster, excludeNode *redis_cluste
 	return cluster.Node
 }
 
+func restorePathForCluster(cluster *redis_cluster.Cluster) string {
+	if cluster.RedisCluster.Spec.RestoreFrom != "" {
+		return cluster.RedisCluster.Spec.RestoreFrom
+	}
+	return cluster.RedisCluster.Status.RestorePath
+}
+
 func (r *RedisClusterReconciler) formCluster(ctx context.Context, cluster *redis_cluster.Cluster) (health.ClusterHealth, error) {
 
 	// Create the Redis cluster either from scratch or from backups
-	restorePath := cluster.RedisCluster.Spec.RestoreFrom
+	restorePath := restorePathForCluster(cluster)
 	if restorePath == "" && cluster.RedisCluster.Spec.BackupEnabled {
 		var selectErr error
 		restorePath, selectErr = r.selectAutomaticRestorePath(ctx, cluster)
@@ -1427,6 +1462,12 @@ func (r *RedisClusterReconciler) formCluster(ctx context.Context, cluster *redis
 	}
 
 	if restorePath != "" {
+		if cluster.RedisCluster.Status.RestorePath != restorePath {
+			cluster.RedisCluster.Status.RestorePath = restorePath
+			if err := r.updateRedisCluster(ctx, cluster.RedisCluster); err != nil {
+				return health.Warn, utils.WrapErr(err, "failed to persist selected restore generation")
+			}
+		}
 
 		// If backups have not been restored yet, restore
 		if !cluster.RedisCluster.Status.BackupRestored {
