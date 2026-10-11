@@ -149,10 +149,12 @@ func TestEnvtest_GetOrCreateSTS_ActiveClusterNameWins(t *testing.T) {
 	r, _ := newReconciler(t)
 	ctx := context.Background()
 
-	createSTS(t, r, "blue-sts", 6)  // live cluster
-	createSTS(t, r, "green-sts", 6) // template-name pick
-
 	rc := createCR(t, r, "active-cr")
+	for _, name := range []string{"blue-sts", "green-sts"} {
+		sts := newSTS(r.Namespace, name, 6)
+		require.NoError(t, ctrl.SetControllerReference(rc, sts, r.ClusterScheme))
+		require.NoError(t, r.Create(ctx, sts))
+	}
 	rc.Status.ActiveClusterName = "blue-sts"
 	require.NoError(t, r.Status().Update(ctx, rc))
 
