@@ -6,13 +6,13 @@ metadata:
 apiVersion: v1
 kind: Service
 metadata:
-  name: redis-cluster-example
+  name: cache
   namespace: redis-cluster-example
 spec:
   clusterIP: None
   publishNotReadyAddresses: true
   selector:
-    redis_cluster_name: redis-cluster-example
+    redis_cluster_name: cache
   ports:
     - name: redis
       port: 6379
@@ -24,7 +24,7 @@ spec:
 apiVersion: cache.datadoghq.com/v1
 kind: RedisCluster
 metadata:
-  name: redis-cluster-example
+  name: cache
   namespace: redis-cluster-example
   labels:
     # The controller mirrors this compatibility label onto the StatefulSet.
@@ -37,14 +37,18 @@ spec:
   backupFrequency: 0
   statefulsetTemplate:
     spec:
-      serviceName: redis-cluster-example
+      serviceName: cache
       replicas: 6
+      # The operator coordinates Redis role changes and Pod replacement.
+      # Prevent StatefulSet template-label updates from restarting every Pod.
+      updateStrategy:
+        type: OnDelete
       selector:
         matchLabels:
           app: redis-cluster
-          chart_name: redis-cluster-example
+          chart_name: cache
           app.kubernetes.io/name: redis-cluster
-          redis_cluster_name: redis-cluster-example
+          redis_cluster_name: cache
       template:
         spec:
           securityContext:
@@ -85,7 +89,7 @@ spec:
                     fieldRef:
                       fieldPath: metadata.namespace
                 - name: REDIS_SERVICE_NAME
-                  value: redis-cluster-example
+                  value: cache
               ports:
                 - name: redis
                   containerPort: 6379

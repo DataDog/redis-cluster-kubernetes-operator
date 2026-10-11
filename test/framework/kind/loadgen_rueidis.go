@@ -3,6 +3,7 @@ package kind
 import (
 	"context"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -68,7 +69,7 @@ func (s *Suite) deployLoadgenPod(t *testing.T, initAddrs string) {
 			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
 				Name:            loadgen.LoadgenContainerName,
-				Image:           loadgen.LoadgenPodImage,
+				Image:           resolvedLoadgenImage(),
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Ports:           []corev1.ContainerPort{{ContainerPort: loadgen.LoadgenPodPort}},
 				Env:             []corev1.EnvVar{{Name: "LOADGEN_INIT_ADDRS", Value: initAddrs}},
@@ -86,6 +87,13 @@ func (s *Suite) deployLoadgenPod(t *testing.T, initAddrs string) {
 		},
 	}
 	require.NoError(t, s.Fixture.Client.Create(s.Ctx, pod))
+}
+
+func resolvedLoadgenImage() string {
+	if image := os.Getenv("LOADGEN_IMAGE"); image != "" {
+		return image
+	}
+	return loadgen.LoadgenPodImage
 }
 
 // waitLoadgenPodReady blocks until the loadgen pod is Running+Ready.
