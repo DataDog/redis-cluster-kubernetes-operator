@@ -1,9 +1,12 @@
 package redis_cluster
 
 import (
+	"context"
 	"testing"
 
 	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
+	"github.com/DataDog/redis-cluster-kubernetes-operator/metrics"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -12,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestGetFilterLabels(t *testing.T) {
@@ -145,4 +149,45 @@ func TestGetStatefulSetForRedisClusterRejectsAmbiguousPrunedVolumeClaimName(t *t
 	client := &ClusterClient{ClusterScheme: scheme}
 	_, err := client.getStatefulSetForRedisCluster(redisCluster)
 	require.EqualError(t, err, "cannot unambiguously restore pruned volume claim template name: found 2 candidate pod volumes")
+}
+
+func TestCreateGreenStatefulSetRestoresPrunedChartVersion(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, cachev1.AddToScheme(scheme))
+
+	redisCluster := &cachev1.RedisCluster{
+		TypeMeta: metav1.TypeMeta{APIVersion: cachev1.GroupVersion.String(), Kind: "RedisCluster"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cache",
+			Namespace: "default",
+			UID:       types.UID("cluster-uid"),
+			Labels:    map[string]string{"chart_version": "v2"},
+		},
+		Spec: cachev1.RedisClusterSpec{
+			Primaries: 1,
+			StatefulsetTemplate: appsv1.StatefulSet{Spec: appsv1.StatefulSetSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"app":                "redis",
+					"redis_cluster_name": "cache",
+				}},
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					"app":                "redis",
+					"redis_cluster_name": "cache",
+				}}},
+			}},
+		},
+		Status: cachev1.RedisClusterStatus{ActiveClusterName: "cache"},
+	}
+	clusterClient := &ClusterClient{
+		Client:        fake.NewClientBuilder().WithScheme(scheme).Build(),
+		ClusterScheme: scheme,
+		Log:           logr.Discard(),
+		Metrics:       metrics.CreateNoop(),
+	}
+
+	greenStatefulSet, _, err := clusterClient.CreateGreenStatefulSet(context.Background(), redisCluster)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", greenStatefulSet.Labels["chart_version"])
+	assert.Nil(t, redisCluster.Spec.StatefulsetTemplate.Labels)
 }

@@ -401,7 +401,7 @@ func (h *Handler) resetBGToNone(ctx context.Context, cluster *redis_cluster.Clus
 		}
 	}
 	if len(allIPs) > 0 {
-		h.setReplicaMigration(cluster.Toolbox, allIPs, true)
+		h.setReplicaMigration(ctx, cluster.Toolbox, allIPs, true)
 	}
 
 	h.cleanupAllBGArtifacts(ctx, cluster, svcNames...)
@@ -518,6 +518,7 @@ func allNodesSeenAsMaster(clusterNodes string, wantMaster map[string]bool) bool 
 // forgetConverged reports whether no forgotten blue ID still appears on any green
 // primary. Unreachable nodes count as not-converged (listed as "<ip>:unreachable").
 func (h *Handler) forgetConverged(
+	ctx context.Context,
 	toolbox *redis_cluster.Toolbox,
 	greenPrimaryIPs []string,
 	forgottenIDs []string,
@@ -532,7 +533,7 @@ func (h *Handler) forgetConverged(
 		if ip == "" {
 			continue
 		}
-		rc, stdout, _, err := toolbox.ClusterNodes(context.Background(), ip)
+		rc, stdout, _, err := toolbox.ClusterNodes(ctx, ip)
 		if err != nil || rc != 0 {
 			stillPresentOn = append(stillPresentOn, fmt.Sprintf("%s:unreachable(rc=%d)", ip, rc))
 			continue
@@ -575,7 +576,7 @@ func isSlaveOfGreenPod(replicationInfo string, bgStatus *cachev1.BlueGreenStatus
 
 // setReplicaMigration sets cluster-allow-replica-migration on the given nodes.
 // Disabled during BG to stop gossip races from moving replicas to wrong primaries.
-func (h *Handler) setReplicaMigration(toolbox *redis_cluster.Toolbox, nodeIPs []string, enabled bool) {
+func (h *Handler) setReplicaMigration(ctx context.Context, toolbox *redis_cluster.Toolbox, nodeIPs []string, enabled bool) {
 	val := "yes"
 	if !enabled {
 		val = "no"
@@ -585,7 +586,7 @@ func (h *Handler) setReplicaMigration(toolbox *redis_cluster.Toolbox, nodeIPs []
 		if ip == "" {
 			continue
 		}
-		if rc, _, stderr, err := toolbox.ConfigureReplicaMigration(context.Background(), ip, enabled); err != nil || rc != 0 {
+		if rc, _, stderr, err := toolbox.ConfigureReplicaMigration(ctx, ip, enabled); err != nil || rc != 0 {
 			h.log.Info("CONFIG SET cluster-allow-replica-migration failed (non-fatal)", "ip", ip, "value", val, "rc", rc, "stderr", stderr, "err", err)
 			failed++
 		} else {
@@ -597,12 +598,12 @@ func (h *Handler) setReplicaMigration(toolbox *redis_cluster.Toolbox, nodeIPs []
 
 // countGreenOnlySlots returns cluster_slots_assigned from the first responsive green
 // node (green-only coverage post-FORGET), or -1 if none respond.
-func (h *Handler) countGreenOnlySlots(toolbox *redis_cluster.Toolbox, bgStatus *cachev1.BlueGreenStatus) int64 {
+func (h *Handler) countGreenOnlySlots(ctx context.Context, toolbox *redis_cluster.Toolbox, bgStatus *cachev1.BlueGreenStatus) int64 {
 	for _, m := range bgStatus.ShardMapping {
 		if m.GreenPodIP == "" {
 			continue
 		}
-		rc, info, _, err := toolbox.ClusterInfo(context.Background(), m.GreenPodIP)
+		rc, info, _, err := toolbox.ClusterInfo(ctx, m.GreenPodIP)
 		if err != nil || rc != 0 {
 			continue
 		}
