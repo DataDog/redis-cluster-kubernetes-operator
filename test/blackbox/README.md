@@ -6,7 +6,7 @@ The suite requires a dedicated kubeconfig created by the provider runner. Tests 
 
 ## KIND
 
-Install Docker, Go, KIND, `kubectl`, and Helm 3. Run commands from the repository root:
+Install Docker, Go, KIND v0.30.0 or newer, `kubectl`, and Helm 3. To match CI exactly, run `go install sigs.k8s.io/kind@v0.30.0`. Run commands from the repository root:
 
 ```sh
 # Canonical public example, topology, durable data, and pod recreation.

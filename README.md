@@ -17,6 +17,25 @@ The Redis operators we evaluated did not provide the same combination of Kuberne
 
 The API remains `cache.datadoghq.com/v1`, including its existing JSON fields, and the leader-election identity remains unchanged for compatibility.
 
+## Local quick start
+
+On macOS, start a Docker runtime with Colima, then create the local development
+cluster:
+
+```sh
+colima start --cpu 4 --memory 8 --disk 30
+go install sigs.k8s.io/kind@v0.30.0
+export PATH="$(go env GOPATH)/bin:$PATH"
+make local-up
+export KUBECONFIG="$PWD/.local/kubeconfig"
+```
+
+The command builds the current checkout, installs the chart into a dedicated
+one-node KIND cluster, applies the six-pod `cache` example, and waits for a
+healthy Redis topology. It never uses the current context from the default
+kubeconfig. See [`docs/getting-started.md`](docs/getting-started.md) for data,
+restart, log, qualification, and cleanup commands.
+
 ## Install
 
 Prerequisites are Helm 3 and a Kubernetes 1.33 cluster. Until a release image is published, build and load the operator image into your registry or local cluster:
@@ -133,7 +152,17 @@ portability.
 - Blue-green rollout qualification covers image changes. Resource-only pod template changes are not currently included in the rollout hash.
 - Backup deployment is not provided by the reference workload and requires the prerequisites above.
 - The Phase 1 toolbox remains present. Its Redis operations are typed, but removal of the toolbox is future work.
-- The CRD is cluster-scoped while each controller watches one namespace. Coordinate CRD lifecycle when installing multiple releases.
+- `RedisCluster` resources are namespaced. The CRD definition is cluster-wide and shared by all releases, so coordinate CRD upgrades when installing multiple namespace-scoped controllers.
+
+## Documentation
+
+- [Local quick start](docs/getting-started.md)
+- [Redis workload contract](docs/workload-contract.md)
+- [Operations guide](docs/operations.md)
+- [RedisCluster API reference](docs/api-reference.md)
+- [Example workload](examples/README.md)
+- [Deployed-operator clean-room tests](test/blackbox/README.md)
+- [In-process KIND tests](e2e/README.md)
 
 ## Development
 
@@ -153,7 +182,7 @@ chart, and reconciles Redis 8.6 through the packaged operator Deployment. It
 does not use dd-source, an internal chart, a private registry, or a
 pre-existing operator installation.
 
-Local prerequisites are Docker, Go, KIND, `kubectl`, and Helm 3. From the repository root, the complete smoke path is one command:
+Local prerequisites are Docker, Go, KIND v0.30.0 or newer, `kubectl`, and Helm 3. Install the same KIND version used by CI with `go install sigs.k8s.io/kind@v0.30.0`. From the repository root, the complete smoke path is one command:
 
 ```sh
 ci/run-cleanroom.sh kind smoke

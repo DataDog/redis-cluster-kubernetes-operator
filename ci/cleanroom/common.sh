@@ -13,6 +13,28 @@ cleanroom_require_commands() {
   done
 }
 
+cleanroom_require_kind_version() {
+  local required_major="$1"
+  local required_minor="$2"
+  local required_patch="$3"
+  local version_output major minor patch
+
+  version_output="$(kind version 2>/dev/null)" || cleanroom_die \
+    "KIND v${required_major}.${required_minor}.${required_patch} or newer is required"
+  [[ "$version_output" =~ ^kind[[:space:]]v([0-9]+)\.([0-9]+)\.([0-9]+)([[:space:]]|$) ]] || cleanroom_die \
+    "KIND v${required_major}.${required_minor}.${required_patch} or newer is required; could not parse: $version_output"
+
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  patch="${BASH_REMATCH[3]}"
+  if ((major < required_major ||
+       (major == required_major && minor < required_minor) ||
+       (major == required_major && minor == required_minor && patch < required_patch))); then
+    cleanroom_die \
+      "KIND v${required_major}.${required_minor}.${required_patch} or newer is required; found v${major}.${minor}.${patch}"
+  fi
+}
+
 cleanroom_validate_run_id() {
   local run_id="$1"
   [[ "$run_id" =~ ^[a-z0-9][a-z0-9-]{2,30}$ ]] || cleanroom_die \
