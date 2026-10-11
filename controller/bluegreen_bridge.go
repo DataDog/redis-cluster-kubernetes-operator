@@ -33,8 +33,8 @@ func (r *RedisClusterReconciler) UpdateStatusWithSpecHash(ctx context.Context, c
 	return r.updateRedisCluster(ctx, cluster.RedisCluster)
 }
 
-func (r *RedisClusterReconciler) RunBackup(ctx context.Context, cluster *redis_cluster.Cluster) (bool, error) {
-	return r.backup(ctx, cluster)
+func (r *RedisClusterReconciler) RunSafetyBackup(ctx context.Context, cluster *redis_cluster.Cluster) (bool, error) {
+	return r.backupForBlueGreen(ctx, cluster)
 }
 
 func (r *RedisClusterReconciler) FindHealthyRefNode(cluster *redis_cluster.Cluster, exclude *redis_cluster.ClusterNode) *redis_cluster.ClusterNode {

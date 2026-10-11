@@ -88,8 +88,11 @@ func (r *RedisClustersReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	cacheKey := req.NamespacedName.String()
 	if ts, ok := r.notFoundCache.Load(cacheKey); ok {
 		cachedAt, valid := ts.(time.Time)
-		if valid && time.Since(cachedAt) < constants.NotFoundCacheTTL {
-			return ctrl.Result{}, nil
+		if valid {
+			elapsed := time.Since(cachedAt)
+			if elapsed < constants.NotFoundCacheTTL {
+				return ctrl.Result{RequeueAfter: constants.NotFoundCacheTTL - elapsed}, nil
+			}
 		}
 		r.notFoundCache.Delete(cacheKey)
 	}
@@ -164,6 +167,11 @@ func (r *RedisClusterReconciler) reconcile(ctx context.Context, req ctrl.Request
 	// identity is a controller concern, so restore it from the owning CR before
 	// any StatefulSet or blue-green operation uses the template.
 	restorePrunedStatefulSetMetadata(redisCluster)
+	if err := redisCluster.ValidateTopology(); err != nil {
+		r.Log.Error(err, "Invalid RedisCluster topology")
+		_ = r.Metrics.CountBadSituation("invalid_topology")
+		return ctrl.Result{}, health.Error, err
+	}
 
 	// Report
 	statefulSetIsReady := redisCluster.Status.StatefulSetReady

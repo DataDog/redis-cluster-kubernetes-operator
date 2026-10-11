@@ -224,26 +224,9 @@ func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *r
 				return cluster, utils.WrapErr(uerr, "failed to check unassigned slots before restore")
 			}
 			if len(unassignedRanges) > 0 {
-				affectedNodes := r.findNodesWithUnassignedSlots(cluster)
-				if len(affectedNodes) == 0 {
-					// Unassigned ranges but no slotless primary to pin them to: requeue, don't guess.
-					_ = r.Metrics.CountBadSituation("unassigned_slots_no_affected_node")
-					return cluster, fmt.Errorf("unassigned slots present but no slotless primary identified; requeueing")
-				}
-
-				backupAvailable, berr := r.latestBackupExists(cluster)
-				if berr != nil {
-					// Existence unknown (probe failed): requeue, never treat as absent.
-					_ = r.Metrics.CountBadSituation("backup_probe_failed_blocking_empty_assign")
-					return cluster, utils.WrapErr(berr, "backup existence probe failed; refusing to empty-assign lost slots")
-				}
-				if !backupAvailable {
-					// Backup-enabled but no backup: requeue + alert, don't zero.
-					_ = r.Metrics.CountBadSituation("slot_loss_no_backup_blocking_empty_assign")
-					return cluster, fmt.Errorf("lost slots on backup-enabled cluster but no backup found; refusing to empty-assign, requeueing")
-				}
-
-				return r.recoverLostSlots(ctx, cluster, affectedNodes, log)
+				// recoverLostSlots validates latest and then previous before any
+				// mutation. If neither exists or can be verified, it fails closed.
+				return r.recoverLostSlots(ctx, cluster, log)
 			}
 		}
 
@@ -499,25 +482,6 @@ func assignAllSlots(ctx context.Context, cluster *redis_cluster.Cluster, primary
 	return true, true, nil
 }
 
-func (r *RedisClusterReconciler) findNodesWithUnassignedSlots(cluster *redis_cluster.Cluster) []*redis_cluster.ClusterNode {
-	var nodes []*redis_cluster.ClusterNode
-	for _, node := range cluster.AllNodes {
-		if node.RoleIs(redis_cluster.PrimaryNode) && len(node.Views) > 0 {
-			hasSlots := false
-			for _, view := range node.Views {
-				if len(view.SlotsRanges) > 0 {
-					hasSlots = true
-					break
-				}
-			}
-			if !hasSlots {
-				nodes = append(nodes, node)
-			}
-		}
-	}
-	return nodes
-}
-
 func (r *RedisClusterReconciler) prepareLostSlotRestore(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, path string) (map[int]string, map[stagedArtifactKey]stagedBackupArtifact, error) {
 	coverage, manifest, err := r.backupSlotCoverage(cluster, path)
 	if err != nil {
@@ -530,10 +494,10 @@ func (r *RedisClusterReconciler) prepareLostSlotRestore(ctx context.Context, clu
 	return coverage, staged, nil
 }
 
-// recoverLostSlots brings slotless primaries back from backup: a node that still holds its
-// data re-claims its slots from the manifest (ADDSLOTS never flushes keys); an empty node is
-// restored from dump.rdb and re-owns next reconcile. Bounds the keys-only restore loop.
-func (r *RedisClusterReconciler) recoverLostSlots(ctx context.Context, cluster *redis_cluster.Cluster, affected []*redis_cluster.ClusterNode, log logr.Logger) (*redis_cluster.Cluster, error) {
+// recoverLostSlots reconstructs every missing part of each manifest shard. A
+// data-bearing primary reclaims only its unassigned ranges; an empty primary is
+// restored before those ranges are reclaimed.
+func (r *RedisClusterReconciler) recoverLostSlots(ctx context.Context, cluster *redis_cluster.Cluster, log logr.Logger) (*redis_cluster.Cluster, error) {
 	latestPath := r.latestBackupPath(cluster)
 	previousPath := r.previousBackupPath(cluster)
 	backend, backendErr := r.backupBackend(cluster)
@@ -554,23 +518,28 @@ func (r *RedisClusterReconciler) recoverLostSlots(ctx context.Context, cluster *
 	}
 	defer r.cleanupStagedArtifacts(cluster, staged)
 
+	plans, planErr := planRestoredSlotOwnership(cluster, coverage)
+	if planErr != nil {
+		return cluster, utils.WrapErr(planErr, "refusing ambiguous lost-slot recovery")
+	}
 	var needRestore []*redis_cluster.ClusterNode
 	reowned := 0
-	for _, n := range affected {
-		ranges := coverage[n.PodIndex]
-		if ranges == "" {
-			needRestore = append(needRestore, n)
+	for _, plan := range plans {
+		if len(plan.missing) == 0 {
 			continue
 		}
-		// Re-own only if the node already holds its data; otherwise restore the RDB first.
-		if dbsize, derr := cluster.Toolbox.DBSize(n.IP); derr != nil || dbsize == 0 {
-			needRestore = append(needRestore, n)
+		dbsize, dbsizeErr := cluster.Toolbox.DBSize(plan.target.IP)
+		if dbsizeErr != nil {
+			return cluster, utils.WrapErr(dbsizeErr, fmt.Sprintf("failed to inspect recovery target %s", plan.target.PodName))
+		}
+		if dbsize == 0 {
+			needRestore = append(needRestore, plan.target)
 			continue
 		}
-		if err := r.reownSlots(cluster, n, ranges); err != nil {
-			log.Error(err, "Failed to re-own slots from manifest; will restore", "podName", n.PodName)
-			needRestore = append(needRestore, n)
-			continue
+		for _, slots := range plan.missing {
+			if err := cluster.Toolbox.AddSlots(plan.target, slots.First, slots.Last); err != nil {
+				return cluster, utils.WrapErr(err, fmt.Sprintf("failed to re-own slots %d-%d on pod %s", slots.First, slots.Last, plan.target.PodName))
+			}
 		}
 		reowned++
 	}
@@ -582,21 +551,28 @@ func (r *RedisClusterReconciler) recoverLostSlots(ctx context.Context, cluster *
 	if len(needRestore) > 0 {
 		log.Info("Restoring affected nodes from backup", "restorePath", restorePath, "count", len(needRestore))
 		restoreErr := r.restoreStagedNodes(ctx, cluster, restorePath, needRestore, staged)
-		if restoreErr != nil && restorePath == latestPath {
-			log.Error(restoreErr, "Restore from latest failed, trying previous")
-			if prevExists, prevErr := r.backupExists(cluster, previousPath); prevErr == nil && prevExists {
-				if restoreErr = r.restoreNodes(ctx, cluster, previousPath, needRestore); restoreErr == nil {
-					_ = r.Metrics.CountBadSituation("restore_fallback_to_previous")
-				}
-			}
-		}
 		if restoreErr != nil {
 			// Have a backup but couldn't restore: requeue, never empty-assign.
 			_ = r.Metrics.CountBadSituation("restore_slot_loss_recovery_failed")
 			return cluster, utils.WrapErr(restoreErr, "restore of lost slots failed; requeueing")
 		}
+		refreshed, refreshErr := r.refreshCluster(ctx, cluster)
+		if refreshErr != nil {
+			return cluster, utils.WrapErr(refreshErr, "failed to refresh restored lost-slot targets")
+		}
+		postRestorePlans, postRestorePlanErr := planRestoredSlotOwnership(refreshed, coverage)
+		if postRestorePlanErr != nil {
+			return refreshed, utils.WrapErr(postRestorePlanErr, "refusing ambiguous post-restore slot recovery")
+		}
+		for _, plan := range postRestorePlans {
+			for _, slots := range plan.missing {
+				if err := refreshed.Toolbox.AddSlots(plan.target, slots.First, slots.Last); err != nil {
+					return refreshed, utils.WrapErr(err, fmt.Sprintf("failed to complete restored slots %d-%d on pod %s", slots.First, slots.Last, plan.target.PodName))
+				}
+			}
+		}
 		_ = r.Metrics.CountBadSituation("restore_slot_loss_recovery")
-		return cluster, nil // pods restarting; re-own happens on the next reconcile
+		return refreshed, nil
 	}
 
 	// Pure re-own: refresh so a backup later this reconcile records the new coverage.
@@ -606,25 +582,6 @@ func (r *RedisClusterReconciler) recoverLostSlots(ctx context.Context, cluster *
 		}
 	}
 	return cluster, nil
-}
-
-// reownSlots claims the given "first-last,..." ranges for a node via CLUSTER ADDSLOTSRANGE.
-// ADDSLOTS assigns ownership only and never flushes keys, so a node already holding the data
-// starts serving it.
-func (r *RedisClusterReconciler) reownSlots(cluster *redis_cluster.Cluster, node *redis_cluster.ClusterNode, ranges string) error {
-	for _, part := range strings.Split(ranges, ",") {
-		if strings.TrimSpace(part) == "" {
-			continue
-		}
-		lo, hi, ok := parseSlotRange(part)
-		if !ok {
-			return fmt.Errorf("invalid slot range %q in manifest", part)
-		}
-		if err := cluster.Toolbox.AddSlots(node, lo, hi); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 type restoredShardPlan struct {
@@ -894,7 +851,7 @@ func (r *RedisClusterReconciler) failoverReplicas(ctx context.Context, cluster *
 
 			// primary is gone, failover
 			log.Info("Failover missing node", "primaryID", replicaNode.PrimaryID, "replicaID", replicaNode.ID, "takeover", takeover)
-			err := cluster.Toolbox.Failover(replicaNode, true, takeover)
+			err := cluster.Toolbox.Failover(replicaNode, !takeover, takeover)
 			if err != nil {
 				log.Error(err, "Failed to failover a node", "primaryID", replicaNode.PrimaryID, "replicaID", replicaNode.ID)
 				return cluster, false, utils.WrapErr(err, "failed to failover a node")
@@ -1457,15 +1414,15 @@ func (r *RedisClusterReconciler) formCluster(ctx context.Context, cluster *redis
 	// Create the Redis cluster either from scratch or from backups
 	restorePath := cluster.RedisCluster.Spec.RestoreFrom
 	if restorePath == "" && cluster.RedisCluster.Spec.BackupEnabled {
-		backupAvailable, berr := r.latestBackupExists(cluster)
-		if berr != nil {
+		var selectErr error
+		restorePath, selectErr = r.selectAutomaticRestorePath(ctx, cluster)
+		if selectErr != nil {
 			// Don't guess: forming an empty cluster when a backup may exist risks
 			// discarding recoverable data. Requeue and retry the probe.
-			return health.Error, utils.WrapErr(berr, "backup existence probe failed during cluster formation; requeueing")
+			return health.Error, utils.WrapErr(selectErr, "backup selection failed during cluster formation; requeueing")
 		}
-		if backupAvailable {
-			restorePath = r.latestBackupPath(cluster)
-			r.Log.Info("No explicit restoreFrom set, auto-restoring from latest backup", "restorePath", restorePath)
+		if restorePath != "" {
+			r.Log.Info("No explicit restoreFrom set, auto-restoring from backup", "restorePath", restorePath)
 		}
 	}
 

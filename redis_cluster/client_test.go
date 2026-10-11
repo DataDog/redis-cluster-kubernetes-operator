@@ -63,6 +63,38 @@ func TestGetFilterLabels(t *testing.T) {
 	ast.NotNil(err4)
 }
 
+func TestGetOrCreateStatefulSetRejectsForeignOwner(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, cachev1.AddToScheme(scheme))
+	controller := true
+	redisCluster := &cachev1.RedisCluster{
+		TypeMeta: metav1.TypeMeta{APIVersion: cachev1.GroupVersion.String(), Kind: "RedisCluster"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cache", Namespace: "default", UID: types.UID("cache-uid"),
+		},
+		Spec: cachev1.RedisClusterSpec{Primaries: 1},
+	}
+	foreignStatefulSet := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cache", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: cachev1.GroupVersion.String(), Kind: "RedisCluster",
+				Name: "other", UID: types.UID("other-uid"), Controller: &controller,
+			}},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithRuntimeObjects(redisCluster, foreignStatefulSet).Build()
+	clusterClient := &ClusterClient{
+		Client: fakeClient, ClusterScheme: scheme, Namespace: "default",
+		Log: logr.Discard(), Metrics: metrics.CreateNoop(),
+	}
+
+	_, err := clusterClient.GetOrCreateStatefulSet(context.Background(), redisCluster)
+	require.ErrorContains(t, err, "not controlled by RedisCluster default/cache")
+}
+
 func TestGetRedisClusterPodsUsesPersistedSelectorWhenTemplateMetadataIsPruned(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(scheme))
@@ -235,4 +267,24 @@ func TestCreateGreenStatefulSetRestoresPrunedChartVersion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "v2", greenStatefulSet.Labels["chart_version"])
 	assert.Nil(t, redisCluster.Spec.StatefulsetTemplate.Labels)
+}
+
+func TestGetRedisPortAcceptsDocumentedServicePortName(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "default"},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "redis", Port: 6380}}},
+	}
+	clusterClient := &ClusterClient{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(service).Build(),
+		Log:    logr.Discard(),
+	}
+
+	port, err := clusterClient.getRedisPort(context.Background(), &cachev1.RedisCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "default"},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 6380, port)
 }

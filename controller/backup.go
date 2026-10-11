@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/constants"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/kube"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/metrics"
@@ -132,13 +133,24 @@ func (r *RedisClusterReconciler) backupContainer(cluster *redis_cluster.Cluster)
 }
 
 func (r *RedisClusterReconciler) backup(ctx context.Context, cluster *redis_cluster.Cluster) (bool, error) {
+	return r.backupWithOptions(ctx, cluster, false)
+}
+
+func (r *RedisClusterReconciler) backupForBlueGreen(ctx context.Context, cluster *redis_cluster.Cluster) (bool, error) {
+	return r.backupWithOptions(ctx, cluster, true)
+}
+
+func (r *RedisClusterReconciler) backupWithOptions(ctx context.Context, cluster *redis_cluster.Cluster, forceBlueGreenSafetyBackup bool) (bool, error) {
 	if !cluster.RedisCluster.Spec.BackupEnabled {
 		r.Log.Info("Backup is disabled for this Redis cluster")
 		return false, nil
 	}
 
 	bgPhase := cluster.RedisCluster.Status.BlueGreen.Phase
-	if bgPhase != "" {
+	if forceBlueGreenSafetyBackup && bgPhase != cachev1.BlueGreenPhaseWaitingSync {
+		return false, fmt.Errorf("blue-green safety backup requires phase %q, got %q", cachev1.BlueGreenPhaseWaitingSync, bgPhase)
+	}
+	if bgPhase != "" && !forceBlueGreenSafetyBackup {
 		r.Log.Info("Skipping backup during blue-green deployment", "phase", bgPhase)
 		return false, nil
 	}
@@ -146,7 +158,7 @@ func (r *RedisClusterReconciler) backup(ctx context.Context, cluster *redis_clus
 	now := time.Now().Unix()
 	lastBackupTime := cluster.RedisCluster.Status.LastBackupTime
 	timeSinceLastBackup := now - lastBackupTime
-	backupIsNeeded := cluster.RedisCluster.Status.LastBackupTime == 0 || timeSinceLastBackup > cluster.RedisCluster.Spec.BackupFrequency
+	backupIsNeeded := forceBlueGreenSafetyBackup || cluster.RedisCluster.Status.LastBackupTime == 0 || timeSinceLastBackup > cluster.RedisCluster.Spec.BackupFrequency
 
 	if !backupIsNeeded {
 		r.Log.Info("Backup is enabled for this Redis cluster, but not needed now", "now", now, "lastBackupTime", lastBackupTime,
@@ -427,6 +439,53 @@ func (r *RedisClusterReconciler) inProgressBackupPath(cluster *redis_cluster.Clu
 	return fmt.Sprintf("%s/in-progress", r.backupRootPath(cluster))
 }
 
+func selectBackupGeneration(paths []string, exists func(string) (bool, error), validate func(string) error) (string, error) {
+	var invalid []error
+	found := false
+	for _, backupPath := range paths {
+		available, err := exists(backupPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to probe backup generation %s: %w", backupPath, err)
+		}
+		if !available {
+			continue
+		}
+		found = true
+		if err := validate(backupPath); err != nil {
+			invalid = append(invalid, fmt.Errorf("backup generation %s is invalid: %w", backupPath, err))
+			continue
+		}
+		return backupPath, nil
+	}
+	if found {
+		return "", fmt.Errorf("no valid backup generation is available: %w", errors.Join(invalid...))
+	}
+	return "", nil
+}
+
+func (r *RedisClusterReconciler) selectAutomaticRestorePath(ctx context.Context, cluster *redis_cluster.Cluster) (string, error) {
+	if len(cluster.AllNodes) == 0 {
+		return "", fmt.Errorf("no nodes available to inspect backups")
+	}
+	backend, err := r.backupBackend(cluster)
+	if err != nil {
+		return "", err
+	}
+	store := r.bindBackupStore(cluster, backend, cluster.AllNodes[0])
+	latestPath := r.latestBackupPath(cluster)
+	previousPath := r.previousBackupPath(cluster)
+	selected, err := selectBackupGeneration(
+		[]string{latestPath, previousPath},
+		func(path string) (bool, error) { return store.Exists(ctx, path) },
+		func(path string) error { return r.validateBackupGeneration(ctx, cluster, backend, path) },
+	)
+	if selected == previousPath {
+		r.Log.Info("Latest backup unavailable or invalid; restoring previous generation", "restorePath", selected)
+		_ = r.Metrics.CountBadSituation("restore_fallback_to_previous")
+	}
+	return selected, err
+}
+
 func (r *RedisClusterReconciler) readBackupManifest(cluster *redis_cluster.Cluster, backupPath string) (*BackupManifest, error) {
 	return r.readBackupManifestContext(cluster.Toolbox.Context(), cluster, backupPath)
 }
@@ -456,19 +515,12 @@ func (r *RedisClusterReconciler) readBackupManifestContext(ctx context.Context, 
 	return manifest, nil
 }
 
-func (r *RedisClusterReconciler) validateBackupGeneration(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, backupPath string) (resultErr error) {
+func (r *RedisClusterReconciler) validateBackupGeneration(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, backupPath string) error {
 	manifest, err := r.readBackupManifestContext(ctx, cluster, backupPath)
 	if err != nil {
 		return err
 	}
-	staged, err := r.stageRestoreArtifacts(ctx, cluster, backend, backupPath, manifest)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, r.cleanupStagedArtifacts(cluster, staged))
-	}()
-	return nil
+	return r.validateBackupArtifacts(ctx, cluster, backend, backupPath, manifest)
 }
 
 func decodeBackupManifest(data []byte) (*BackupManifest, error) {
@@ -704,6 +756,11 @@ func (r *RedisClusterReconciler) restoreStagedNodes(ctx context.Context, cluster
 	podNames := make([]string, len(nodes))
 	for i, node := range nodes {
 		podNames[i] = node.PodName
+		if _, ok := staged[stagedArtifactKey{ordinal: node.PodIndex, kind: backupArtifactRDB}]; !ok {
+			return fmt.Errorf("manifest has no RDB artifact for restore target ordinal %d", node.PodIndex)
+		}
+	}
+	for _, node := range nodes {
 		appendOnly, err := cluster.Toolbox.AppendOnlyEnabled(ctx, node)
 		if err != nil {
 			return fmt.Errorf("cannot verify persistence mode for pod %q before restore: %w", node.PodName, err)
@@ -968,6 +1025,79 @@ type stagedArtifactKey struct {
 	kind    string
 }
 
+func backupFileForArtifact(artifact BackupArtifact) redis_cluster.BackupFile {
+	if artifact.Kind == backupArtifactNodes {
+		return redis_cluster.BackupFileStagedNodesConf
+	}
+	return redis_cluster.BackupFileStagedDump
+}
+
+// planBackupValidation distributes stored artifacts across the currently
+// available pods. Each pod processes its list sequentially, so generations
+// from a larger historical topology can be validated without fixed-path
+// staging collisions or a matching current pod ordinal.
+func planBackupValidation(nodes []*redis_cluster.ClusterNode, artifacts []BackupArtifact) ([][]stagedBackupArtifact, error) {
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("no nodes available to validate backup artifacts")
+	}
+	assignments := make([][]stagedBackupArtifact, len(nodes))
+	for index, artifact := range artifacts {
+		nodeIndex := index % len(nodes)
+		assignments[nodeIndex] = append(assignments[nodeIndex], stagedBackupArtifact{
+			artifact: artifact,
+			node:     nodes[nodeIndex],
+			file:     backupFileForArtifact(artifact),
+		})
+	}
+	return assignments, nil
+}
+
+func (r *RedisClusterReconciler) validateBackupArtifacts(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, backupPath string, manifest *BackupManifest) error {
+	assignments, err := planBackupValidation(cluster.AllNodes, manifest.Artifacts)
+	if err != nil {
+		return err
+	}
+
+	eg, validationCtx := errgroup.WithContext(ctx)
+	for _, podAssignments := range assignments {
+		podAssignments := podAssignments
+		eg.Go(func() error {
+			for _, entry := range podAssignments {
+				artifactErr := func() (resultErr error) {
+					if err := cluster.Toolbox.RemoveBackupFiles(entry.node, entry.file); err != nil {
+						return fmt.Errorf("failed to clear validation path for artifact %q: %w", entry.artifact.ObjectKey, err)
+					}
+					defer func() {
+						resultErr = errors.Join(resultErr, cluster.Toolbox.RemoveBackupFiles(entry.node, entry.file))
+					}()
+
+					localPath, err := entry.file.Path()
+					if err != nil {
+						return err
+					}
+					remotePath := backupPath + "/" + entry.artifact.ObjectKey
+					if err := r.bindBackupStore(cluster, backend, entry.node).DownloadFile(validationCtx, remotePath, localPath); err != nil {
+						return fmt.Errorf("failed to stage artifact %q for validation: %w", entry.artifact.ObjectKey, err)
+					}
+					size, digest, err := cluster.Toolbox.BackupFileMetadata(validationCtx, entry.node, entry.file)
+					if err != nil {
+						return fmt.Errorf("failed to inspect artifact %q: %w", entry.artifact.ObjectKey, err)
+					}
+					return validateStagedArtifact(entry.artifact, size, digest)
+				}()
+				if artifactErr != nil {
+					return artifactErr
+				}
+			}
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return fmt.Errorf("backup generation validation failed: %w", err)
+	}
+	return nil
+}
+
 func (r *RedisClusterReconciler) stageRestoreArtifacts(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, restorePath string, manifest *BackupManifest) (map[stagedArtifactKey]stagedBackupArtifact, error) {
 	nodesByOrdinal := make(map[int]*redis_cluster.ClusterNode, len(cluster.AllNodes))
 	for _, node := range cluster.AllNodes {
@@ -979,10 +1109,7 @@ func (r *RedisClusterReconciler) stageRestoreArtifacts(ctx context.Context, clus
 		if node == nil {
 			return nil, fmt.Errorf("restore target has no node for backup ordinal %d", artifact.Ordinal)
 		}
-		file := redis_cluster.BackupFileStagedDump
-		if artifact.Kind == backupArtifactNodes {
-			file = redis_cluster.BackupFileStagedNodesConf
-		}
+		file := backupFileForArtifact(artifact)
 		entry := stagedBackupArtifact{artifact: artifact, node: node, file: file}
 		staged[stagedArtifactKey{ordinal: artifact.Ordinal, kind: artifact.Kind}] = entry
 	}

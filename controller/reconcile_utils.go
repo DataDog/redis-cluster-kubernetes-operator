@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -163,31 +164,37 @@ func computeRolloutSpecHash(cluster *redis_cluster.Cluster) string {
 }
 
 func computeRolloutSpecHashForTemplate(template corev1.PodTemplateSpec) string {
-	labels := make(map[string]string, len(template.Labels))
-	for key, value := range template.Labels {
-		if key == constants.BlueGreenRoleLabel || key == constants.RedisClusterReadyPodLabel {
+	normalized := template.DeepCopy()
+	labels := make(map[string]string, len(normalized.Labels))
+	for key, value := range normalized.Labels {
+		if key == constants.BlueGreenRoleLabel ||
+			key == constants.RedisClusterReadyPodLabel ||
+			key == constants.BlueGreenStatefulSetLabel {
 			continue
 		}
 		labels[key] = value
 	}
+	normalized.Labels = labels
 
-	h := struct {
-		Annotations map[string]string `json:"a"`
-		Labels      map[string]string `json:"l"`
-		Images      []string          `json:"i"`
-	}{
-		Annotations: template.Annotations,
-		Labels:      labels,
+	// The operator rewrites this value to the rollout's private peer Service.
+	// Exclude that generated value while retaining the rest of each container.
+	for containerIndex := range normalized.Spec.Containers {
+		for envIndex := range normalized.Spec.Containers[containerIndex].Env {
+			env := &normalized.Spec.Containers[containerIndex].Env[envIndex]
+			if env.Name == "REDIS_SERVICE_NAME" {
+				env.Value = "<operator-managed>"
+				env.ValueFrom = nil
+			}
+		}
 	}
 
-	for _, c := range template.Spec.InitContainers {
-		h.Images = append(h.Images, c.Name+"="+c.Image)
-	}
-	for _, c := range template.Spec.Containers {
-		h.Images = append(h.Images, c.Name+"="+c.Image)
-	}
+	// Apply the same Kubernetes defaults to the embedded desired template and
+	// the API-server-persisted StatefulSet template before comparing them.
+	pod := &corev1.Pod{Spec: normalized.Spec}
+	clientgoscheme.Scheme.Default(pod)
+	normalized.Spec = pod.Spec
 
-	data, _ := json.Marshal(h)
+	data, _ := json.Marshal(normalized)
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("%x", sum)
 }
