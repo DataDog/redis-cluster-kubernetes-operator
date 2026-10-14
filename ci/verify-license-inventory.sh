@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 
 set -euo pipefail
 
@@ -37,8 +40,10 @@ errors = []
 origin_pattern = re.compile(r"^https://pkg\.go\.dev/(.+)@([^?]+)\?tab=licenses$")
 for row in rows:
     component = row["Component"]
-    if not component or not row["License"]:
-        errors.append(f"{component or '<empty component>'}: component and license are required")
+    if not component or not row["License"] or not row["Copyright"]:
+        errors.append(
+            f"{component or '<empty component>'}: component, license, and copyright are required"
+        )
         continue
     if component in actual:
         errors.append(f"{component}: duplicate component")
