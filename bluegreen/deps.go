@@ -23,7 +23,7 @@ type Deps interface {
 
 	// StatefulSet / Pod queries
 	GetStatefulSetByName(ctx context.Context, ns, name string) (*appsv1.StatefulSet, error)
-	GetGreenStatefulSet(ctx context.Context, ns, name string) (*appsv1.StatefulSet, error)
+	GetGreenStatefulSet(ctx context.Context, rc *cachev1.RedisCluster, name string) (*appsv1.StatefulSet, error)
 	GetGreenPods(ctx context.Context, rc *cachev1.RedisCluster) ([]corev1.Pod, error)
 	GetBluePods(ctx context.Context, rc *cachev1.RedisCluster) (*corev1.PodList, error)
 	GetRedisClusterPods(ctx context.Context, rc *cachev1.RedisCluster) (*corev1.PodList, error)
@@ -33,10 +33,10 @@ type Deps interface {
 	CreateGreenHeadlessService(ctx context.Context, rc *cachev1.RedisCluster, name string, port int) error
 	UpdateServiceSelector(ctx context.Context, ns, name string, sel map[string]string) error
 	DeleteStatefulSet(ctx context.Context, ns, name string) error
-	DeleteGreenResources(ctx context.Context, ns, name string) error
+	DeleteGreenResources(ctx context.Context, rc *cachev1.RedisCluster, name string) error
 
 	// Backup
-	RunBackup(ctx context.Context, cluster *redis_cluster.Cluster) (bool, error)
+	RunSafetyBackup(ctx context.Context, cluster *redis_cluster.Cluster) (bool, error)
 
 	// Cluster helpers forwarded from controller package
 	FindHealthyRefNode(cluster *redis_cluster.Cluster, exclude *redis_cluster.ClusterNode) *redis_cluster.ClusterNode

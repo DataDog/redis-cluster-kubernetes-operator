@@ -23,7 +23,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -44,7 +46,7 @@ func (d *testDeps) UpdateSpec(ctx context.Context, rc *cachev1.RedisCluster) err
 	return d.Client.Update(ctx, rc)
 }
 
-func (d *testDeps) RunBackup(_ context.Context, _ *redis_cluster.Cluster) (bool, error) {
+func (d *testDeps) RunSafetyBackup(_ context.Context, _ *redis_cluster.Cluster) (bool, error) {
 	return false, nil
 }
 
@@ -79,6 +81,7 @@ func newRedisCluster(name, namespace string, primaries, replicas int32) *cachev1
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
+			UID:       types.UID(name + "-uid"),
 		},
 		Spec: cachev1.RedisClusterSpec{
 			Primaries: primaries,
@@ -545,6 +548,41 @@ func TestCreateGreenStatefulSet_Idempotent(t *testing.T) {
 	assert.Equal(t, "redis-cluster-test-alt", greenSTS2.Name)
 }
 
+func TestCreateGreenStatefulSetRejectsForeignNameCollision(t *testing.T) {
+	rc := newRedisCluster("cache", "default", 1, 0)
+	foreignRC := newRedisCluster("cache-alt", "default", 1, 0)
+	zero := int32(0)
+	foreignSTS := rc.Spec.StatefulsetTemplate.DeepCopy()
+	foreignSTS.Name = "cache-alt"
+	foreignSTS.Namespace = "default"
+	foreignSTS.Spec.Replicas = &zero
+	controller := true
+	foreignSTS.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: cachev1.GroupVersion.String(),
+		Kind:       "RedisCluster",
+		Name:       foreignRC.Name,
+		UID:        foreignRC.UID,
+		Controller: &controller,
+	}}
+	scheme := newScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithRuntimeObjects(rc, foreignRC, foreignSTS).Build()
+	cc := redis_cluster.ClusterClient{
+		Client: fakeClient, ClusterScheme: scheme, Namespace: "default",
+		Log: logr.Discard(), Metrics: metrics.CreateNoop(),
+	}
+
+	_, _, err := cc.CreateGreenStatefulSet(context.Background(), rc)
+	require.ErrorContains(t, err, "not controlled by RedisCluster default/cache")
+
+	persisted := &appsv1.StatefulSet{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: "default", Name: "cache-alt",
+	}, persisted))
+	require.NotNil(t, persisted.Spec.Replicas)
+	assert.Zero(t, *persisted.Spec.Replicas, "the foreign StatefulSet must not be deleted")
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Integration test: CreateGreenHeadlessService
 // ────────────────────────────────────────────────────────────────────────────
@@ -613,11 +651,16 @@ func TestCreateGreenHeadlessService_UpdatesSelectorIfExists(t *testing.T) {
 	rc := newRedisCluster("redis-cluster-test", "default", 3, 1)
 	scheme := newScheme(t)
 	greenSTSName := "redis-cluster-test-alt"
+	controller := true
 
 	existingSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      redis_cluster.BlueGreenPeerServiceName(greenSTSName),
 			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: cachev1.GroupVersion.String(), Kind: "RedisCluster",
+				Name: rc.Name, UID: rc.UID, Controller: &controller,
+			}},
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "None",
@@ -682,7 +725,7 @@ func TestDeleteGreenResources(t *testing.T) {
 	err = cc.CreateGreenHeadlessService(ctx, rc, greenSTSName, 6379)
 	require.NoError(t, err)
 
-	err = cc.DeleteGreenResources(ctx, "default", greenSTSName)
+	err = cc.DeleteGreenResources(ctx, rc, greenSTSName)
 	require.NoError(t, err)
 
 	sts := &appsv1.StatefulSet{}
@@ -723,8 +766,68 @@ func TestDeleteGreenResources_AlreadyGone(t *testing.T) {
 
 	ctx := context.Background()
 
-	err := cc.DeleteGreenResources(ctx, "default", "nonexistent-green")
+	err := cc.DeleteGreenResources(ctx, rc, "nonexistent-green")
 	require.NoError(t, err)
+}
+
+func TestDeleteGreenResourcesKeepsOwnershipEvidenceWhenPVCDeletionFails(t *testing.T) {
+	rc := newRedisCluster("redis-cluster-test", "default", 1, 0)
+	scheme := newScheme(t)
+	pvcDeleteErr := errors.New("injected PVC deletion failure")
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(rc).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, k8sClient client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if _, isPVC := obj.(*corev1.PersistentVolumeClaim); isPVC {
+					return pvcDeleteErr
+				}
+				return k8sClient.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	cc := redis_cluster.ClusterClient{
+		Client: fakeClient, ClusterScheme: scheme, Namespace: "default",
+		Log: logr.Discard(), Metrics: metrics.CreateNoop(),
+	}
+	greenSTS, greenName, err := cc.CreateGreenStatefulSet(context.Background(), rc)
+	require.NoError(t, err)
+	require.NoError(t, fakeClient.Create(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-" + greenName + "-0", Namespace: "default"},
+	}))
+
+	err = cc.DeleteGreenResources(context.Background(), rc, greenName)
+
+	require.ErrorIs(t, err, pvcDeleteErr)
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{
+		Name: greenSTS.Name, Namespace: greenSTS.Namespace,
+	}, &appsv1.StatefulSet{}), "owned StatefulSet must remain so the next retry can verify PVC ownership")
+}
+
+func TestDeleteGreenResourcesRejectsForeignStatefulSet(t *testing.T) {
+	rc := newRedisCluster("cache", "default", 1, 0)
+	foreignRC := newRedisCluster("cache-alt", "default", 1, 0)
+	foreignSTS := rc.Spec.StatefulsetTemplate.DeepCopy()
+	foreignSTS.Name = "cache-alt"
+	foreignSTS.Namespace = "default"
+	controller := true
+	foreignSTS.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: cachev1.GroupVersion.String(), Kind: "RedisCluster",
+		Name: foreignRC.Name, UID: foreignRC.UID, Controller: &controller,
+	}}
+	scheme := newScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithRuntimeObjects(rc, foreignRC, foreignSTS).Build()
+	cc := redis_cluster.ClusterClient{
+		Client: fakeClient, ClusterScheme: scheme, Namespace: "default",
+		Log: logr.Discard(), Metrics: metrics.CreateNoop(),
+	}
+
+	err := cc.DeleteGreenResources(context.Background(), rc, "cache-alt")
+	require.ErrorContains(t, err, "not controlled by RedisCluster default/cache")
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: "default", Name: "cache-alt",
+	}, &appsv1.StatefulSet{}))
 }
 
 // ────────────────────────────────────────────────────────────────────────────

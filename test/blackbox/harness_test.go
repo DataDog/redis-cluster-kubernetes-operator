@@ -42,7 +42,7 @@ import (
 
 const (
 	referenceNamespace = "redis-cluster-example"
-	referenceName      = "redis-cluster-example"
+	referenceName      = "cache"
 	redisClusterLabel  = "redis_cluster_name"
 	redisReadyLabel    = "redis-cluster-ready"
 	componentLabel     = "app.kubernetes.io/component"

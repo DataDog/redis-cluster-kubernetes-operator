@@ -203,9 +203,11 @@ func TestDetectSpecChanges_MigratesRolloutHashFromActiveStatefulSet(t *testing.T
 		name         string
 		desiredImage string
 		configure    func(*cachev1.RedisCluster)
+		liveDefaults bool
 		wantChanged  bool
 	}{
 		{name: "unchanged", desiredImage: "redis:7.2.0", wantChanged: false},
+		{name: "unchanged with API defaults", desiredImage: "redis:7.2.0", liveDefaults: true, wantChanged: false},
 		{name: "pending image change", desiredImage: "redis:7.4.0", wantChanged: true},
 		{
 			name:         "pending live backup control change",
@@ -234,6 +236,15 @@ func TestDetectSpecChanges_MigratesRolloutHashFromActiveStatefulSet(t *testing.T
 				Spec: appsv1.StatefulSetSpec{
 					Template: *applied.RedisCluster.Spec.StatefulsetTemplate.Spec.Template.DeepCopy(),
 				},
+			}
+			if tc.liveDefaults {
+				gracePeriod := int64(30)
+				sts.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyAlways
+				sts.Spec.Template.Spec.DNSPolicy = corev1.DNSClusterFirst
+				sts.Spec.Template.Spec.SchedulerName = corev1.DefaultSchedulerName
+				sts.Spec.Template.Spec.TerminationGracePeriodSeconds = &gracePeriod
+				sts.Spec.Template.Spec.Containers[0].TerminationMessagePath = corev1.TerminationMessagePathDefault
+				sts.Spec.Template.Spec.Containers[0].TerminationMessagePolicy = corev1.TerminationMessageReadFile
 			}
 
 			k8sClient := fake.NewClientBuilder().

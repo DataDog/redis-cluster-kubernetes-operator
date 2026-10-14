@@ -37,6 +37,36 @@ expect_rejected_without_disclosure() {
   fi
 }
 
+expect_missing_scanner_fails_closed() {
+  local secret="missing-scanner-secret-$HEX36"
+  local fixture="$TEMP_DIR/missing-scanner"
+  local output="$TEMP_DIR/missing-scanner.github-output"
+  local stdout="$TEMP_DIR/missing-scanner.stdout"
+  local stderr="$TEMP_DIR/missing-scanner.stderr"
+  local empty_path="$TEMP_DIR/empty-path"
+
+  mkdir -p "$fixture" "$empty_path"
+  printf '%s\n' "password=$secret" >"$fixture/artifact.txt"
+  if PATH="$empty_path" GITHUB_OUTPUT="$output" /bin/bash "$SCANNER" "$fixture" >"$stdout" 2>"$stderr"; then
+    echo "artifact verification passed without its scanner" >&2
+    exit 1
+  fi
+  if grep -F -q -- "$secret" "$stdout" "$stderr"; then
+    echo "missing-scanner failure disclosed rejected content" >&2
+    exit 1
+  fi
+  if [[ -s "$output" ]]; then
+    echo "artifact was marked safe without its scanner" >&2
+    exit 1
+  fi
+  grep -F -x -q 'artifact safety scan failed' "$stderr" || {
+    echo "missing-scanner failure was not reported" >&2
+    exit 1
+  }
+}
+
+expect_missing_scanner_fails_closed
+
 expect_rejected_without_disclosure \
   "credential-field" \
   "field-secret-$HEX36" \

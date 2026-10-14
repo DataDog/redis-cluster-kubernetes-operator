@@ -19,16 +19,18 @@ func TestToolboxBackupFileOperationsUseFixedArgv(t *testing.T) {
 	node := &ClusterNode{PodName: "redis-cluster-sample-0"}
 
 	require.NoError(t, tb.PrepareNodesConfBackup(node))
+	require.NoError(t, tb.PrepareDumpRDBBackup(node))
 	require.NoError(t, tb.ActivateStagedDump(node))
-	require.NoError(t, tb.RemoveBackupFiles(node, BackupFileNodesConfBackup, BackupFileStagedDump, BackupFileStagedNodesConf))
+	require.NoError(t, tb.RemoveBackupFiles(node, BackupFileNodesConfBackup, BackupFileDumpRDBBackup, BackupFileStagedDump, BackupFileStagedNodesConf))
 
 	calls := stub.Calls()
-	require.Len(t, calls, 5)
+	require.Len(t, calls, 6)
 	assert.Equal(t, []string{"cp", "--", "/mnt/redis/nodes.conf", "/mnt/redis/nodes.conf.backup"}, calls[0].Command)
 	assert.Equal(t, []string{"sed", "-E", "-i", `s/([0-9]+\.){3}[0-9]+/0.42.42.42/g`, "/mnt/redis/nodes.conf.backup"}, calls[1].Command)
-	assert.Equal(t, []string{"mv", "--", "/mnt/redis/dump.rdb.restore", "/mnt/redis/dump.rdb"}, calls[2].Command)
-	assert.Equal(t, []string{"chmod", "a+rw", "--", "/mnt/redis/dump.rdb"}, calls[3].Command)
-	assert.Equal(t, []string{"rm", "-f", "--", "/mnt/redis/nodes.conf.backup", "/mnt/redis/dump.rdb.restore", "/mnt/redis/nodes.conf.restore"}, calls[4].Command)
+	assert.Equal(t, []string{"cp", "--", "/mnt/redis/dump.rdb", "/mnt/redis/dump.rdb.backup"}, calls[2].Command)
+	assert.Equal(t, []string{"chmod", "a+rw", "--", "/mnt/redis/dump.rdb.restore"}, calls[3].Command)
+	assert.Equal(t, []string{"mv", "--", "/mnt/redis/dump.rdb.restore", "/mnt/redis/dump.rdb"}, calls[4].Command)
+	assert.Equal(t, []string{"rm", "-f", "--", "/mnt/redis/nodes.conf.backup", "/mnt/redis/dump.rdb.backup", "/mnt/redis/dump.rdb.restore", "/mnt/redis/nodes.conf.restore"}, calls[5].Command)
 	for _, call := range calls {
 		assert.Equal(t, node.PodName, call.PodName)
 		assert.Equal(t, constants.RedisContainerName, call.ContainerName)
@@ -99,20 +101,19 @@ func TestToolboxPrepareNodesConfBackupReportsSanitizeAndCleanupFailures(t *testi
 
 func TestToolboxActivateStagedDumpStopsOnMoveFailure(t *testing.T) {
 	stub := toolbox.New().
-		OnCommand("move", func(_, _ string, command []string) bool { return command[0] == "mv" }, toolbox.Failure(2, "move failed")).
-		OnCommand("permissions", func(_, _ string, command []string) bool { return command[0] == "chmod" }, toolbox.OK())
+		OnCommand("permissions", func(_, _ string, command []string) bool { return command[0] == "chmod" }, toolbox.OK()).
+		OnCommand("move", func(_, _ string, command []string) bool { return command[0] == "mv" }, toolbox.Failure(2, "move failed"))
 	tb := newToolboxWithStub(stub)
 
 	require.ErrorContains(t, tb.ActivateStagedDump(&ClusterNode{PodName: "redis-cluster-sample-0"}), "move failed")
-	require.Len(t, stub.Calls(), 1)
+	require.Len(t, stub.Calls(), 2)
 }
 
 func TestToolboxActivateStagedDumpReportsPermissionFailure(t *testing.T) {
 	stub := toolbox.New().
-		OnCommand("move", func(_, _ string, command []string) bool { return command[0] == "mv" }, toolbox.OK()).
 		OnCommand("permissions", func(_, _ string, command []string) bool { return command[0] == "chmod" }, toolbox.Failure(2, "chmod failed"))
 	tb := newToolboxWithStub(stub)
 
 	require.ErrorContains(t, tb.ActivateStagedDump(&ClusterNode{PodName: "redis-cluster-sample-0"}), "chmod failed")
-	require.Len(t, stub.Calls(), 2)
+	require.Len(t, stub.Calls(), 1)
 }

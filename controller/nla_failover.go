@@ -228,15 +228,16 @@ func (r *RedisClusterReconciler) handleNLA(ctx context.Context, cluster *redis_c
 		"isPrimary", node.RoleIs(redis_cluster.PrimaryNode))
 
 	// FAILOVER only — defer FORGET to forgetTerminatingNLANodes when the pod actually terminates.
+	preparedForTermination := !node.RoleIs(redis_cluster.PrimaryNode)
 	if node.RoleIs(redis_cluster.PrimaryNode) {
-		err = r.ensureNotPrimary(ctx, cluster, podList, node, nlaPod.Name)
+		preparedForTermination, err = r.ensureNotPrimary(ctx, cluster, podList, node, nlaPod)
 	} else {
 		r.Log.Info("NLA: node stays in cluster until pod termination",
 			"pod_name", nlaPod.Name, "nodeID", node.ID, "nodeRole", node.Role)
 	}
 
 	// Urgent path: pod already terminating — FORGET now and persist the marker.
-	if err == nil && nlaPod.DeletionTimestamp != nil {
+	if err == nil && nlaPod.DeletionTimestamp != nil && preparedForTermination {
 		r.Log.Info("NLA: pod already terminating, forgetting immediately",
 			"pod_name", nlaPod.Name, "nodeID", node.ID)
 		forgetNode(ctx, cluster, node, r.Log, r.Metrics)
@@ -244,6 +245,9 @@ func (r *RedisClusterReconciler) handleNLA(ctx context.Context, cluster *redis_c
 			r.Log.Error(patchErr, "NLA: failed to persist forgotten annotation",
 				"pod_name", nlaPod.Name)
 		}
+	} else if err == nil && nlaPod.DeletionTimestamp != nil {
+		r.Log.Info("NLA: primary Pod was replaced; preserving node membership",
+			"pod_name", nlaPod.Name, "nodeID", node.ID)
 	}
 
 	nlaDuration := time.Since(nlaStart).Milliseconds()

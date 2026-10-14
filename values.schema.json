@@ -14,10 +14,16 @@
     "operator": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["replicaCount", "image", "serviceAccount", "redisAuth", "leaderElection", "metrics", "probes", "terminationGracePeriodSeconds", "resources", "podAnnotations", "podLabels"],
+      "required": ["replicaCount", "image", "imagePullSecrets", "serviceAccount", "redisAuth", "leaderElection", "metrics", "probes", "terminationGracePeriodSeconds", "resources", "podAnnotations", "podLabels"],
       "properties": {
         "replicaCount": { "type": "integer", "minimum": 1, "maximum": 10 },
-        "image": { "$ref": "#/definitions/image" },
+        "image": { "$ref": "#/definitions/operatorImage" },
+        "imagePullSecrets": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/dnsSubdomain" }
+        },
         "serviceAccount": { "$ref": "#/definitions/serviceAccount" },
         "redisAuth": {
           "type": "object",
@@ -118,6 +124,7 @@
   "definitions": {
     "dnsLabel": { "type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$" },
     "dnsLabelOrEmpty": { "type": "string", "maxLength": 63, "pattern": "^(?:|[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)$" },
+    "dnsSubdomain": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$" },
     "dnsSubdomainOrEmpty": { "type": "string", "maxLength": 253, "pattern": "^(?:|[a-z0-9](?:[-.a-z0-9]*[a-z0-9])?)$" },
     "secretKey": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9._-]+$" },
     "stringMap": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 1024 } },
@@ -149,6 +156,17 @@
       "properties": {
         "repository": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[a-z0-9]+(?:[._/-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$" },
         "tag": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "operatorImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[a-z0-9]+(?:[._/-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$" },
+        "tag": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$" },
+        "digest": { "type": "string", "pattern": "^(?:|sha256:[a-f0-9]{64})$" },
         "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
       }
     },

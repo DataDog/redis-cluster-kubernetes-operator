@@ -84,7 +84,10 @@ func parseClusterNodesFrom(clusterNodes, viewerIP string) (byID map[string]parse
 		}
 
 		id := fields[0]
-		ip := strings.Split(strings.Split(fields[1], "@")[0], ":")[0]
+		ip, _, addressOK := redis_cluster.ParseClusterNodeAddress(fields[1])
+		if !addressOK {
+			continue
+		}
 		flags := fields[2]
 		if ip == "" && viewerIP != "" && hasNodeFlag(flags, "myself") {
 			ip = viewerIP

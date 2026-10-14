@@ -39,6 +39,14 @@ app.kubernetes.io/component: toolbox
 {{- default (include "redis-cluster-kubernetes-operator.fullname" .) .Values.operator.serviceAccount.name -}}
 {{- end -}}
 
+{{- define "redis-cluster-kubernetes-operator.operatorImage" -}}
+{{- if .Values.operator.image.digest -}}
+{{- printf "%s@%s" .Values.operator.image.repository .Values.operator.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.operator.image.repository .Values.operator.image.tag -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "redis-cluster-kubernetes-operator.toolboxServiceAccountName" -}}
 {{- default (include "redis-cluster-kubernetes-operator.toolboxFullname" .) .Values.toolbox.serviceAccount.name -}}
 {{- end -}}

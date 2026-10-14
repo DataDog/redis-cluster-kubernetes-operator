@@ -42,6 +42,14 @@ func TestPreferredRedisIP(t *testing.T) {
 	require.Equal(t, "10.0.0.1", preferredRedisIP(pods, "missing"))
 }
 
+func TestResolvedLoadgenImage(t *testing.T) {
+	t.Setenv("LOADGEN_IMAGE", "")
+	require.Equal(t, "rco-loadgen:test", resolvedLoadgenImage())
+
+	t.Setenv("LOADGEN_IMAGE", "example.test/loadgen:custom")
+	require.Equal(t, "example.test/loadgen:custom", resolvedLoadgenImage())
+}
+
 func TestCountMGetMatches(t *testing.T) {
 	keys := []string{"k0", "k1", "k2"}
 	written := map[string]string{

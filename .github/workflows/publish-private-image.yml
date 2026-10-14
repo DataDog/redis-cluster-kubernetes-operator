@@ -1,0 +1,322 @@
+name: Publish private staging image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: Same-repository branch whose current tip will be built
+        required: true
+        type: string
+      commit:
+        description: Full 40-character SHA at the current source branch tip
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/datadog/redis-cluster-kubernetes-operator
+
+jobs:
+  source:
+    name: Resolve immutable branch tip
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.identity.outputs.branch }}
+      sha: ${{ steps.identity.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: refs/heads/${{ inputs.source_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate source branch identity
+        id: identity
+        env:
+          REQUESTED_BRANCH: ${{ inputs.source_branch }}
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+        run: |
+          git check-ref-format --branch "$REQUESTED_BRANCH"
+          [[ "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "commit must be a full lowercase 40-character SHA" >&2
+            exit 1
+          }
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$REQUESTED_COMMIT"
+          echo "branch=$REQUESTED_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "sha=$actual" >> "$GITHUB_OUTPUT"
+
+  unit:
+    name: Unit tests
+    needs: source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install Kubernetes 1.33 envtest binaries
+        run: |
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20250626154428-7fd020cb5fc3 use 1.33.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
+      - run: go test ./...
+
+  chart:
+    name: Chart tests
+    needs: source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - run: |
+          helm lint . --strict --kube-version 1.33.0
+          helm template gizmo-compatibility . --kube-version 1.36.0 >/dev/null
+          ci/test-chart-image-settings.sh
+
+  security:
+    name: Vulnerability scan
+    needs: source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Scan Go dependencies for known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  cleanroom-smoke:
+    name: Packaged operator clean-room KIND smoke
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - name: Install pinned KIND
+        run: go install sigs.k8s.io/kind@v0.30.0
+      - name: Run clean-room smoke
+        env:
+          CLEANROOM_RUN_ID: staging-image-${{ github.run_id }}-${{ github.run_attempt }}
+          CLEANROOM_TEST_TIMEOUT: 40m
+        run: ci/run-cleanroom.sh kind smoke
+
+  publish:
+    name: Publish approved multi-architecture image
+    needs: [source, unit, chart, security, cleanroom-smoke]
+    environment: staging-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.export.outputs.digest }}
+      tag: ${{ steps.identity.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate immutable source identity
+        id: identity
+        env:
+          REQUESTED_COMMIT: ${{ needs.source.outputs.sha }}
+        run: |
+          [[ "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "commit must be a full lowercase 40-character SHA" >&2
+            exit 1
+          }
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$REQUESTED_COMMIT"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --short --untracked-files=all)"
+          echo "sha=$actual" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-$actual" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build, publish, and export one immutable image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          outputs: |
+            type=registry,name=${{ env.IMAGE }}:${{ steps.identity.outputs.tag }}
+            type=oci,name=${{ env.IMAGE }}:${{ steps.identity.outputs.tag }},dest=${{ runner.temp }}/redis-operator.oci.tar
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.identity.outputs.sha }}
+          sbom: true
+          provenance: false
+      - name: Verify exported OCI image matches the published manifest
+        id: export
+        env:
+          OCI_ARCHIVE: ${{ runner.temp }}/redis-operator.oci.tar
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          test "$REPOSITORY_PRIVATE" = "true"
+          registry_digest="sha256:$(
+            docker buildx imagetools inspect "$IMAGE:$TAG" --raw \
+              | sha256sum \
+              | cut -d ' ' -f 1
+          )"
+          archive_digest="$(
+            tar -xOf "$OCI_ARCHIVE" index.json \
+              | jq -er '
+                  if (.manifests | length) == 1 then
+                    .manifests[0].digest
+                  else
+                    error("expected exactly one top-level OCI manifest")
+                  end
+                '
+          )"
+          test "$archive_digest" = "$registry_digest"
+          echo "digest=$registry_digest" >> "$GITHUB_OUTPUT"
+          echo "archive=$OCI_ARCHIVE" >> "$GITHUB_OUTPUT"
+      - name: Generate feature-source provenance predicate
+        id: provenance
+        env:
+          SOURCE_BRANCH: ${{ needs.source.outputs.branch }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          predicate="$RUNNER_TEMP/provenance.json"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg source_branch "$SOURCE_BRANCH" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg workflow_git_ref "$GITHUB_REF" \
+            --arg workflow_path ".github/workflows/publish-private-image.yml" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg workflow_sha "$GITHUB_SHA" \
+            --arg event_name "$GITHUB_EVENT_NAME" \
+            --arg repository_id "$GITHUB_REPOSITORY_ID" \
+            --arg repository_owner_id "$GITHUB_REPOSITORY_OWNER_ID" \
+            --arg runner_environment "$RUNNER_ENVIRONMENT" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{
+              buildDefinition: {
+                buildType: "https://actions.github.io/buildtypes/workflow/v1",
+                externalParameters: {
+                  inputs: {
+                    source_branch: $source_branch,
+                    commit: $source_sha
+                  },
+                  workflow: {
+                    ref: $workflow_git_ref,
+                    repository: ("https://github.com/" + $repository),
+                    path: $workflow_path
+                  }
+                },
+                internalParameters: {
+                  github: {
+                    event_name: $event_name,
+                    repository_id: $repository_id,
+                    repository_owner_id: $repository_owner_id,
+                    runner_environment: $runner_environment
+                  }
+                },
+                resolvedDependencies: [
+                  {
+                    uri: ("git+https://github.com/" + $repository + "@" + $workflow_git_ref),
+                    digest: {gitCommit: $workflow_sha}
+                  },
+                  {
+                    uri: ("git+https://github.com/" + $repository + "@refs/heads/" + $source_branch),
+                    digest: {gitCommit: $source_sha}
+                  }
+                ]
+              },
+              runDetails: {
+                builder: {id: ("https://github.com/" + $workflow_ref)},
+                metadata: {
+                  invocationId: ("https://github.com/" + $repository + "/actions/runs/" + $run_id + "/attempts/" + $run_attempt)
+                }
+              }
+            }' > "$predicate"
+          jq -e --arg sha "$SOURCE_SHA" \
+            '.buildDefinition.buildType == "https://actions.github.io/buildtypes/workflow/v1" and
+             .buildDefinition.externalParameters.workflow.path == ".github/workflows/publish-private-image.yml" and
+             .buildDefinition.internalParameters.github.event_name == "workflow_dispatch" and
+             any(.buildDefinition.resolvedDependencies[]; .digest.gitCommit == $sha)' \
+            "$predicate" >/dev/null
+          echo "path=$predicate" >> "$GITHUB_OUTPUT"
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.export.outputs.digest }}
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: ${{ steps.provenance.outputs.path }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Verify attested feature source
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          jq -r '.dsseEnvelope.payload' "$BUNDLE_PATH" \
+            | base64 --decode \
+            | jq -e --arg sha "$SOURCE_SHA" \
+                'any(.predicate.buildDefinition.resolvedDependencies[]; .digest.gitCommit == $sha)' \
+                >/dev/null
+      - name: Verify manifest platforms
+        env:
+          DIGEST: ${{ steps.export.outputs.digest }}
+        run: |
+          manifest="$(docker buildx imagetools inspect "$IMAGE@$DIGEST")"
+          grep -Eq '^[[:space:]]*Platform:[[:space:]]+linux/amd64$' <<<"$manifest"
+          grep -Eq '^[[:space:]]*Platform:[[:space:]]+linux/arm64$' <<<"$manifest"
+      - name: Retain private OCI image for internal staging import
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: redis-operator-oci-${{ needs.source.outputs.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.export.outputs.archive }}
+            ${{ steps.attest.outputs.bundle-path }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Report published image and OCI artifact
+        env:
+          DIGEST: ${{ steps.export.outputs.digest }}
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          {
+            echo "### Private staging image"
+            echo
+            echo "- Tag: \`$IMAGE:$TAG\`"
+            echo "- Digest: \`$DIGEST\`"
+            echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+            echo "- OCI image and provenance artifact: \`redis-operator-oci-${{ needs.source.outputs.sha }}-${{ github.run_attempt }}\` (1-day retention)"
+            echo "- Visibility: retain the GHCR package as private"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 
@@ -21,9 +20,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -83,18 +85,16 @@ func getReconcileTimeout(podCount int32, overrideSeconds int32) time.Duration {
 
 // Reconcile reconciles the state of the Redis cluster.
 func (r *RedisClustersReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
-
-	// Ensure this really is about a Redis cluster, else quietly ignore the request
-	if !strings.HasPrefix(req.Name, "redis-cluster-") {
-		return ctrl.Result{}, nil
-	}
-
 	// Skip resources recently confirmed as not found to prevent tight reconcile loops
 	// from pod/StatefulSet events targeting non-existent RedisCluster CRs.
 	cacheKey := req.NamespacedName.String()
 	if ts, ok := r.notFoundCache.Load(cacheKey); ok {
-		if time.Since(ts.(time.Time)) < constants.NotFoundCacheTTL {
-			return ctrl.Result{}, nil
+		cachedAt, valid := ts.(time.Time)
+		if valid {
+			elapsed := time.Since(cachedAt)
+			if elapsed < constants.NotFoundCacheTTL {
+				return ctrl.Result{RequeueAfter: constants.NotFoundCacheTTL - elapsed}, nil
+			}
 		}
 		r.notFoundCache.Delete(cacheKey)
 	}
@@ -159,7 +159,7 @@ func (r *RedisClusterReconciler) reconcile(ctx context.Context, req ctrl.Request
 		if errors.IsNotFound(err) {
 			r.Log.Info("RedisCluster resource not found, ignoring (object must be deleted)")
 			r.notFoundCache.Store(req.NamespacedName.String(), time.Now())
-			return ctrl.Result{}, health.OK, nil
+			return ctrl.Result{}, health.Unknown, nil
 		}
 		r.Log.Error(err, "Failed to get the RedisCluster resource")
 		_ = r.Metrics.CountBadSituation("could_not_get_cluster")
@@ -170,6 +170,11 @@ func (r *RedisClusterReconciler) reconcile(ctx context.Context, req ctrl.Request
 	// identity is a controller concern, so restore it from the owning CR before
 	// any StatefulSet or blue-green operation uses the template.
 	restorePrunedStatefulSetMetadata(redisCluster)
+	if err := redisCluster.ValidateTopology(); err != nil {
+		r.Log.Error(err, "Invalid RedisCluster topology")
+		_ = r.Metrics.CountBadSituation("invalid_topology")
+		return ctrl.Result{}, health.Error, err
+	}
 
 	// Report
 	statefulSetIsReady := redisCluster.Status.StatefulSetReady
@@ -334,10 +339,29 @@ func (r *RedisClusterReconciler) reconcile(ctx context.Context, req ctrl.Request
 	// slots momentarily in transition needs handleTerminatingPods/handleNLA
 	// to unstick it, not a "missing slots" bail-out.
 	terminatingStart := time.Now()
-	if err := r.handleTerminatingPods(ctx, cluster); err != nil {
+	podList, podListErr := r.GetRedisClusterPods(ctx, cluster.RedisCluster)
+	if podListErr != nil {
+		r.Log.Error(podListErr, "Failed to list pods for termination handling, continuing reconcile")
+	} else if err := r.handleTerminatingPodsFromList(ctx, cluster, podList); err != nil {
 		r.Log.Error(err, "Failed to handle terminating pods, continuing reconcile")
 	}
 	_ = r.Metrics.Timing(metrics.TimingReconcileStep, time.Since(terminatingStart).Milliseconds(), metrics.StepTagHandleTerminating)
+	if optionalProviderIsNil(r.LifecycleAdapter) {
+		if podList == nil {
+			podList, podListErr = r.GetRedisClusterPods(ctx, cluster.RedisCluster)
+			if podListErr != nil {
+				return ctrl.Result{}, health.Error, fmt.Errorf("failed to list pods for drain candidate correction: %w", podListErr)
+			}
+		}
+		corrected, err := r.handleDrainCandidatePrimary(ctx, cluster, podList)
+		if err != nil {
+			r.Log.Error(err, "Failed to correct drain candidate primary")
+			return ctrl.Result{}, health.Error, err
+		}
+		if corrected {
+			return ctrl.Result{RequeueAfter: constants.QuickRequeue}, health.Pending, nil
+		}
+	}
 
 	nlaStart := time.Now()
 	stable, nlaErr := r.handleLifecycle(ctx, cluster)
@@ -364,6 +388,11 @@ func (r *RedisClusterReconciler) reconcile(ctx context.Context, req ctrl.Request
 	cluster, err = r.maintainCluster(ctx, cluster)
 	_ = r.Metrics.Timing(metrics.TimingReconcileStep, time.Since(maintainStart).Milliseconds(), metrics.StepTagMaintainCluster)
 	if err != nil {
+		if goerrors.Is(err, errConnectivityRepairPending) {
+			r.Log.Info("Requeueing while Redis connectivity repair converges",
+				"requeueAfter", constants.QuickRequeue.String())
+			return ctrl.Result{RequeueAfter: constants.QuickRequeue}, health.Pending, nil
+		}
 		if goerrors.Is(err, errWaitingForRedisEndpointReady) {
 			r.Log.Info("Requeueing while a Redis member waits for client endpoint readiness",
 				"requeueAfter", constants.QuickRequeue.String())
@@ -525,6 +554,34 @@ func (r *RedisClustersReconciler) addAutoscalingProviderWatches(mgr ctrl.Manager
 	return controllerBuilder, nil
 }
 
+func (r *RedisClustersReconciler) mapPodToRedisCluster(ctx context.Context, object client.Object) []ctrl.Request {
+	statefulSetOwner := metav1.GetControllerOf(object)
+	if statefulSetOwner == nil || statefulSetOwner.APIVersion != appsv1.SchemeGroupVersion.String() || statefulSetOwner.Kind != "StatefulSet" {
+		return nil
+	}
+
+	statefulSet := &appsv1.StatefulSet{}
+	key := types.NamespacedName{Namespace: object.GetNamespace(), Name: statefulSetOwner.Name}
+	if err := r.Get(ctx, key, statefulSet); err != nil {
+		if !errors.IsNotFound(err) {
+			r.Log.Error(err, "Failed to resolve Pod owner", "pod", object.GetName(), "statefulSet", key)
+		}
+		return nil
+	}
+	if statefulSetOwner.UID != "" && statefulSet.UID != statefulSetOwner.UID {
+		return nil
+	}
+
+	redisClusterOwner := metav1.GetControllerOf(statefulSet)
+	if redisClusterOwner == nil || redisClusterOwner.APIVersion != cachev1.GroupVersion.String() || redisClusterOwner.Kind != "RedisCluster" {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{
+		Namespace: object.GetNamespace(),
+		Name:      redisClusterOwner.Name,
+	}}}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *RedisClustersReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
@@ -556,14 +613,15 @@ func (r *RedisClustersReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// watch(source, handler)
 		// - source = pod, trigger when a pod event triggers
 		// - handler = what will be triggered
-		// whenever a pod change, enqueue a (reconcile) request for the owner of the pod = the statefulset
+		// Whenever a Pod changes, resolve its StatefulSet controller and enqueue
+		// the RedisCluster that controls that StatefulSet.
 		//
 		// Intentionally unfiltered: DeletionTimestamp transitions must trigger
 		// reconcile so handleTerminatingPods can react before grace expires.
 		// Adding a metadata-filter predicate here would break that contract.
 		Watches(
 			&corev1.Pod{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &appsv1.StatefulSet{}, handler.OnlyControllerOwner()),
+			handler.EnqueueRequestsFromMapFunc(r.mapPodToRedisCluster),
 		).
 
 		// Cap exponential backoff to prevent long stalls after transient errors

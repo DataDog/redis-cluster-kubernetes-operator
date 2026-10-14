@@ -206,7 +206,7 @@ func (t *Toolbox) runRedis(ctx context.Context, address string, port int, args .
 	if err != nil {
 		return 0, "", "", err
 	}
-	command := []string{executable, "-h", address, "-p", strconv.Itoa(port)}
+	command := []string{executable, "-e", "-h", address, "-p", strconv.Itoa(port)}
 	command = append(command, args...)
 	return t.kubeExec.Exec(ctx, t.toolboxPod.Name, constants.ToolboxContainerName, command, t.Log)
 }
@@ -222,7 +222,7 @@ func (t *Toolbox) runRedisCluster(ctx context.Context, args ...string) (int, str
 	if err != nil {
 		return 0, "", "", err
 	}
-	command := append([]string{executable}, args...)
+	command := append([]string{executable, "-e"}, args...)
 	return t.kubeExec.Exec(ctx, t.toolboxPod.Name, constants.ToolboxContainerName, command, t.Log)
 }
 

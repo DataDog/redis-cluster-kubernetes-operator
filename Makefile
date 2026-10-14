@@ -1,9 +1,9 @@
 CONTROLLER_GEN_VERSION := v0.18.0
-CRD_CONTRACT_SHA256 := aa2fed8c152174becab08a45901993572f29c88a34658cb52c889f80d4e04177
+CRD_CONTRACT_SHA256 := b1480856fe755ed908621af8597de592282bd55624f33495d195bcc8bbfed456
 BUILD_DIR ?= bin
 BINARY ?= $(BUILD_DIR)/redis-cluster-kubernetes-operator
 
-.PHONY: build generate generate-deepcopy verify-crd-contract
+.PHONY: build generate generate-deepcopy verify-crd-contract verify-license-inventory local-up local-down cleanroom-smoke
 
 build:
 	mkdir -p "$(BUILD_DIR)"
@@ -21,3 +21,15 @@ generate-deepcopy:
 # tighten the schema even when the Go JSON fields are unchanged.
 verify-crd-contract:
 	go run ./internal/tools/crdcontract -path crds/redis-cluster-v1.yaml -sha256 $(CRD_CONTRACT_SHA256)
+
+local-up:
+	./scripts/local-kind-up.sh
+
+local-down:
+	./scripts/local-kind-down.sh
+
+cleanroom-smoke:
+	./ci/run-cleanroom.sh kind smoke
+
+verify-license-inventory:
+	ci/verify-license-inventory.sh

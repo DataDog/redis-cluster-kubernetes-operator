@@ -30,6 +30,12 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "redis-cluster-kubernetes-operator.operatorServiceAccountName" . }}
+      {{- with .Values.operator.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . | quote }}
+        {{- end }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -38,7 +44,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: operator
-          image: {{ printf "%s:%s" .Values.operator.image.repository .Values.operator.image.tag | quote }}
+          image: {{ include "redis-cluster-kubernetes-operator.operatorImage" . | quote }}
           imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
           args:
             - manage
