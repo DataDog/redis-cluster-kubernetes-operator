@@ -1,3 +1,6 @@
+// Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 // Package kind is a reusable, test-only KIND e2e harness shared across
 // operators: it owns cluster lifecycle, namespace setup, and an
 // in-process controller-runtime manager. Each operator supplies one
