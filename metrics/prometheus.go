@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/DataDog/redis-cluster-kubernetes-operator/health"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/metrics/counters"
@@ -107,8 +108,17 @@ type prometheusMetrics struct {
 // Callers should inject their registry; no collector is registered globally by
 // this constructor unless the caller explicitly supplies the global registry.
 func CreatePrometheus(registerer prometheus.Registerer) (Metrics, error) {
+	m, _, err := CreatePrometheusWithCleanup(registerer)
+	return m, err
+}
+
+// CreatePrometheusWithCleanup registers a self-contained collector set and
+// returns an idempotent function that unregisters it. The caller owns the
+// returned cleanup function and should call it when the reporter is no longer
+// used.
+func CreatePrometheusWithCleanup(registerer prometheus.Registerer) (Metrics, func(), error) {
 	if registerer == nil {
-		return nil, errors.New("metrics registerer is required")
+		return nil, nil, errors.New("metrics registerer is required")
 	}
 	m := &prometheusMetrics{
 		events:        prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: prometheusNamespace, Name: "events_total", Help: "Operator lifecycle events."}, []string{"event"}),
@@ -132,11 +142,19 @@ func CreatePrometheus(registerer prometheus.Registerer) (Metrics, error) {
 			for _, prior := range registered {
 				registerer.Unregister(prior)
 			}
-			return nil, fmt.Errorf("register Prometheus metrics: %w", err)
+			return nil, nil, fmt.Errorf("register Prometheus metrics: %w", err)
 		}
 		registered = append(registered, collector)
 	}
-	return m, nil
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			for _, collector := range registered {
+				registerer.Unregister(collector)
+			}
+		})
+	}
+	return m, cleanup, nil
 }
 
 func (m *prometheusMetrics) collectors() []prometheus.Collector {

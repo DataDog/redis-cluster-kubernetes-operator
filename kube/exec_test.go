@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -18,10 +19,100 @@ func TestExecStreamFailureDoesNotLogCapturedOutput(t *testing.T) {
 		logs.WriteString(prefix)
 		logs.WriteString(args)
 	}, funcr.Options{})
-	err := execStreamFailure(log, errors.New("transport failed"), payload, "provider-secret")
+	err := execStreamFailure(log, errors.New("transport failed"), payload, "provider-secret", true)
 	combined := logs.String() + err.Error()
 	if strings.Contains(combined, payload) || strings.Contains(combined, "provider-secret") {
 		t.Fatalf("captured exec output leaked through stream failure: %s", combined)
+	}
+}
+
+func TestExecWithInputCommandLogOmitsProviderArguments(t *testing.T) {
+	const credential = "https://storage.example/backup?signature=secret-token"
+	var logs strings.Builder
+	log := funcr.New(func(prefix, args string) {
+		logs.WriteString(prefix)
+		logs.WriteString(args)
+	}, funcr.Options{Verbosity: 1})
+
+	logExecCommand(log, "redis-0", "backup", []string{"rclone", "copyto", "-", credential}, false)
+	combined := logs.String()
+	if strings.Contains(combined, credential) || strings.Contains(combined, "secret-token") {
+		t.Fatalf("provider argument leaked through command logging: %s", combined)
+	}
+	if !strings.Contains(combined, "rclone") || !strings.Contains(combined, "argumentCount") {
+		t.Fatalf("safe command summary missing: %s", combined)
+	}
+}
+
+func TestSensitiveExecTransportFailureOmitsDetails(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		failure   error
+		kind      ExecErrorKind
+	}{
+		{
+			name:      "SPDY setup",
+			operation: "remotecommand.NewSPDYExecutor",
+			failure:   errors.New("unable to upgrade connection for https://storage.example/backup?signature=spdy-secret: status code 403 Forbidden"),
+			kind:      ExecAuthentication,
+		},
+		{
+			name:      "stream",
+			operation: "exec.Stream",
+			failure:   errors.New("dial tcp for command rclone copyto - https://storage.example/backup?signature=stream-secret: connection timed out"),
+			kind:      ExecNetwork,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs strings.Builder
+			log := funcr.New(func(prefix, args string) {
+				logs.WriteString(prefix)
+				logs.WriteString(args)
+			}, funcr.Options{})
+
+			err := execTransportFailure(log, tc.failure, tc.operation, false)
+			combined := logs.String() + err.Error()
+			for _, secret := range []string{"spdy-secret", "stream-secret", "storage.example", "rclone copyto"} {
+				if strings.Contains(combined, secret) {
+					t.Fatalf("sensitive transport details leaked through failure: %s", combined)
+				}
+			}
+			if !strings.Contains(combined, "exec transport error (details omitted)") {
+				t.Fatalf("generic transport failure missing: %s", combined)
+			}
+			var execErr *ExecError
+			if !errors.As(err, &execErr) {
+				t.Fatalf("transport failure does not wrap ExecError: %v", err)
+			}
+			if execErr.Kind != tc.kind {
+				t.Fatalf("got kind %q, want %q", execErr.Kind, tc.kind)
+			}
+		})
+	}
+}
+
+func TestOrdinaryExecTransportFailureRetainsSanitizedDetails(t *testing.T) {
+	const credential = "REDISCLI_AUTH=plain-secret"
+	const diagnostic = "dial tcp: connection timed out"
+	var logs strings.Builder
+	log := funcr.New(func(prefix, args string) {
+		logs.WriteString(prefix)
+		logs.WriteString(args)
+	}, funcr.Options{})
+
+	err := execTransportFailure(log, errors.New(diagnostic+" "+credential), "exec.Stream", true)
+	combined := logs.String() + err.Error()
+	if !strings.Contains(combined, diagnostic) {
+		t.Fatalf("ordinary transport diagnostic missing: %s", combined)
+	}
+	if strings.Contains(combined, "plain-secret") {
+		t.Fatalf("Redis credential leaked through transport failure: %s", combined)
+	}
+	if !strings.Contains(combined, "REDISCLI_AUTH=REDACTED") {
+		t.Fatalf("redacted credential marker missing: %s", combined)
 	}
 }
 
@@ -46,9 +137,15 @@ func TestExecErrorClassification(t *testing.T) {
 
 func TestExecStreamFailurePreservesContextSentinels(t *testing.T) {
 	for _, sentinel := range []error{context.Canceled, context.DeadlineExceeded} {
-		err := execStreamFailure(funcr.New(func(string, string) {}, funcr.Options{}), sentinel, "partial manifest", "provider output")
-		if !errors.Is(err, sentinel) {
-			t.Fatalf("stream failure lost context sentinel %v: %v", sentinel, err)
+		for _, exposeDetails := range []bool{false, true} {
+			original := fmt.Errorf("request URL contains secret-token: %w", sentinel)
+			err := execTransportFailure(funcr.New(func(string, string) {}, funcr.Options{}), original, "exec.Stream", exposeDetails)
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("stream failure lost context sentinel %v with exposeDetails=%t: %v", sentinel, exposeDetails, err)
+			}
+			if !exposeDetails && strings.Contains(err.Error(), "secret-token") {
+				t.Fatalf("sensitive context failure leaked transport details: %v", err)
+			}
 		}
 	}
 }

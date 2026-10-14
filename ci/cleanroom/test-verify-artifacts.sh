@@ -72,6 +72,26 @@ expect_rejected_without_disclosure \
   "field-secret-$HEX36" \
   "password=field-secret-$HEX36"
 
+expect_rejected_without_disclosure \
+  "json-credential-field" \
+  "json-secret-$HEX36" \
+  "{\"password\":\"json-secret-$HEX36\"}"
+
+expect_rejected_without_disclosure \
+  "multiline-json-credential-field" \
+  "multiline-json-secret-$HEX36" \
+  $'{\n  "password":\n  "multiline-json-secret-'"$HEX36"$'"\n}'
+
+expect_rejected_without_disclosure \
+  "multiline-yaml-credential-field" \
+  "multiline-yaml-secret-$HEX36" \
+  $'rediscli_auth:\n  multiline-yaml-secret-'"$HEX36"
+
+expect_rejected_without_disclosure \
+  "mixed-redacted-and-unredacted-credential-fields" \
+  "real-secret" \
+  "user=x password=[REDACTED] password=real-secret"
+
 for prefix in cleanroom- p- wrong- missing-; do
   expect_rejected_without_disclosure \
     "canary-${prefix%-}" \

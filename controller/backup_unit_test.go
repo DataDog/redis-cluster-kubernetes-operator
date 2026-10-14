@@ -127,9 +127,9 @@ func TestBackupBucketIsNotSanitizedIntoAnotherResource(t *testing.T) {
 	}
 }
 
-func TestBackupBucketUnsetReturnsEmpty(t *testing.T) {
+func TestBackupLocationUnsetReturnsEmpty(t *testing.T) {
 	t.Setenv("BACKUP_BUCKET", "")
-	assert.Empty(t, (&RedisClusterReconciler{}).backupBucket(clusterWithSpec(cachev1.RedisClusterSpec{})))
+	assert.Empty(t, (&RedisClusterReconciler{}).backupLocation())
 }
 
 func TestBackupBackendSelection(t *testing.T) {
@@ -156,6 +156,77 @@ func TestBackupBackendRejectsMissingAndUnknown(t *testing.T) {
 	t.Setenv("BACKUP_BUCKET", "my-bucket")
 	_, err = r.backupBackend(clusterWithSpec(cachev1.RedisClusterSpec{BackupBackend: "nfs"}))
 	require.Error(t, err)
+}
+
+func TestBackupBackendUsesInjectedFactory(t *testing.T) {
+	t.Setenv("BACKUP_BUCKET", "")
+	var gotProvider, gotLocation string
+	r := &RedisClusterReconciler{BackupBackendFactory: BackupBackendFactoryFunc(func(provider, location string) (BackupProvider, error) {
+		gotProvider, gotLocation = provider, location
+		return stubBackupBackend{}, nil
+	})}
+
+	backend, err := r.backupBackend(clusterWithSpec(cachev1.RedisClusterSpec{BackupBackend: "custom"}))
+	require.NoError(t, err)
+	assert.IsType(t, stubBackupBackend{}, backend)
+	assert.Equal(t, "custom", gotProvider)
+	assert.Empty(t, gotLocation)
+}
+
+func TestBackupBackendRejectsTypedNilFactory(t *testing.T) {
+	t.Setenv("BACKUP_BUCKET", "provider-location")
+	var factory *BackupBackendRegistry
+	r := &RedisClusterReconciler{BackupBackendFactory: factory}
+	_, err := r.backupBackend(clusterWithSpec(cachev1.RedisClusterSpec{BackupBackend: "custom"}))
+	require.ErrorContains(t, err, "factory is nil")
+}
+
+func TestBackupBackendRejectsNilFactoryResult(t *testing.T) {
+	t.Setenv("BACKUP_BUCKET", "provider-location")
+	r := &RedisClusterReconciler{BackupBackendFactory: BackupBackendFactoryFunc(func(string, string) (BackupProvider, error) {
+		return nil, nil
+	})}
+	_, err := r.backupBackend(clusterWithSpec(cachev1.RedisClusterSpec{BackupBackend: "custom"}))
+	require.ErrorContains(t, err, "returned a nil backend")
+}
+
+type backupProviderFunc func(BackendCommandExecutor) BackupStore
+
+func (f backupProviderFunc) Bind(executor BackendCommandExecutor) BackupStore {
+	return f(executor)
+}
+
+func TestBindBackupStoreRejectsNilStore(t *testing.T) {
+	var typedNil *promotionStore
+	tests := []struct {
+		name     string
+		provider BackupProvider
+	}{
+		{
+			name: "nil",
+			provider: backupProviderFunc(func(BackendCommandExecutor) BackupStore {
+				return nil
+			}),
+		},
+		{
+			name: "typed nil",
+			provider: backupProviderFunc(func(BackendCommandExecutor) BackupStore {
+				return typedNil
+			}),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := (&RedisClusterReconciler{}).bindBackupStore(
+				clusterWithSpec(cachev1.RedisClusterSpec{}),
+				tc.provider,
+				&redis_cluster.ClusterNode{PodName: "redis-0"},
+			)
+			require.ErrorContains(t, err, "returned a nil store")
+			assert.Nil(t, store)
+		})
+	}
 }
 
 func TestBackupContainerSelection(t *testing.T) {

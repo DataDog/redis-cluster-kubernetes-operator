@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +95,25 @@ func TestCRDSchemaMatchesTopLevelGoFieldsAndConditionContract(t *testing.T) {
 	backupRetention := root.Properties["spec"].Properties["backupRetention"]
 	if !strings.Contains(strings.ToLower(backupRetention.Description), "deprecated") || !strings.Contains(strings.ToLower(backupRetention.Description), "unsupported") {
 		t.Fatalf("backupRetention description does not mark it deprecated and unsupported: %q", backupRetention.Description)
+	}
+
+	backupBackend := root.Properties["spec"].Properties["backupBackend"]
+	if backupBackend.Default == nil || string(backupBackend.Default.Raw) != `"s3"` {
+		t.Fatalf("backupBackend default = %v, want s3", backupBackend.Default)
+	}
+	if len(backupBackend.Enum) != 0 {
+		t.Fatalf("backupBackend unexpectedly restricts providers to enum %v", backupBackend.Enum)
+	}
+	providerNamePattern, err := regexp.Compile(backupBackend.Pattern)
+	if err != nil {
+		t.Fatalf("compile backupBackend pattern %q: %v", backupBackend.Pattern, err)
+	}
+	for value, wantMatch := range map[string]bool{
+		"custom": true, "vendor.v1": true, "": false, "UPPERCASE": false, strings.Repeat("a", 64): false,
+	} {
+		if got := providerNamePattern.MatchString(value); got != wantMatch {
+			t.Errorf("backupBackend pattern match for %q = %t, want %t", value, got, wantMatch)
+		}
 	}
 
 	conditions := statusSchema.Properties["conditions"]

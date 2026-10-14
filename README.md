@@ -12,7 +12,7 @@ The Redis operators we evaluated did not provide the same combination of Kuberne
 - Namespace-scoped installation and ordinary Kubernetes Service DNS by default.
 - Optional Secret-backed Redis ACL authentication without placing the password in process arguments, URLs, logs, or ConfigMaps.
 - Prometheus metrics and independent controller-runtime health endpoints.
-- Provider-neutral autoscaling and lifecycle interfaces. No external provider is enabled by the public startup path.
+- Provider-neutral autoscaling, lifecycle, and primary endpoint interfaces. The reference binary enables no external autoscaling or lifecycle provider.
 - S3, Google Cloud Storage, and Azure Blob backup contracts with versioned, hashed manifests.
 
 The API remains `cache.datadoghq.com/v1`, including its existing JSON fields, and the leader-election identity remains unchanged for compatibility.
@@ -69,7 +69,7 @@ See `examples/README.md` for its PVC-backed `nodes.conf` layout. Backups are dis
 
 ## Redis authentication
 
-The public startup supports either no authentication (the default) or a
+The reference binary supports either no authentication (the default) or a
 same-namespace Secret. Configure Redis itself with the same ACL user, then
 create the Secret and reference its keys. Redis ACL usernames are identifiers,
 not secret values; the helper passes the username to `redis-cli --user` and
@@ -103,9 +103,59 @@ helm upgrade --install redis-cluster-kubernetes-operator . \
 
 The Secret is mounted only into the toolbox. A fixed helper reads it inside the pod; the password is not sent in exec arguments.
 
+## Integration defaults and embedding
+
+The reference binary supplies the following defaults when an embedding
+application omits an integration:
+
+| `mains.ManageOptions` field | Default when omitted |
+| --- | --- |
+| `Metrics` | Prometheus on `MetricsAddr`, or no-op when `MetricsAddr` is `"0"` |
+| `BackupBackendFactory` | The built-in S3, GCS, and Azure registry; an omitted `spec.backupBackend` selects AWS S3 |
+| `AutoscalingProvider` | None; configured autoscaling reports `ProviderUnavailable` |
+| `LifecycleAdapter` | None; the controller retains its provider-neutral Kubernetes termination safety |
+| `PrimaryEndpointResolver` | Kubernetes Service DNS |
+
+An embedding application can also wire those defaults explicitly:
+
+```go
+reporter, cleanup, err := metrics.CreatePrometheusWithCleanup(ctrlmetrics.Registry)
+if err != nil {
+	return err
+}
+defer cleanup()
+
+err = mains.ManageWithOptions(scheme, log, mains.ManageOptions{
+	Context:                 ctx,
+	MetricsAddr:             ":8080",
+	HealthProbeAddr:         ":8081",
+	Metrics:                 reporter,
+	BackupBackendFactory:    controller.NewBackupBackendRegistry(),
+	PrimaryEndpointResolver: controller.KubernetesServiceDNSResolver{},
+})
+```
+
+To add a backup implementation while retaining the built-ins, call
+`Register` on `NewBackupBackendRegistry` during process startup and pass the
+registry as `BackupBackendFactory`. The constructor has the signature
+`func(location string) (controller.BackupProvider, error)`. To replace
+metrics, pass any implementation of `metrics.Metrics`. The compile-checked
+example in `mains/example_test.go` shows the complete explicit-default setup.
+
+`AutoscalingProvider` supplies primary-count recommendations. An implementation
+may also implement `AutoscalingWatchProvider` to register watches for resources
+that it owns. `LifecycleAdapter` handles an optional external lifecycle
+acknowledgement protocol. `PrimaryEndpointResolver` selects the hostname used by
+the primary identity stability check; the built-in resolver uses
+`<pod>.<service>.<namespace>.svc`. A resolver can disable hostname validation
+when clients use pod IPs.
+
+These are process startup integrations supplied through `ManageOptions`.
+RedisCluster resources cannot provide implementation code or command templates.
+
 ## Metrics and health
 
-Prometheus metrics are served on port `8080` by default. The optional metrics Service can be annotated through `operator.metrics.service.annotations`. Metric labels are bounded and do not include cluster, namespace, or pod names.
+Prometheus metrics are served on port `8080` by default. The optional metrics Service can be annotated through `operator.metrics.service.annotations`. Metric labels are bounded and do not include cluster, namespace, or pod names. Applications embedding the manager can supply any `metrics.Metrics` implementation and their own cancellation context through `mains.ManageWithOptions`, so Datadog, Prometheus, OpenTelemetry, StatsD, or another backend can use the same controller contract.
 
 Liveness and readiness use a separate listener on port `8081`:
 
@@ -114,15 +164,15 @@ Liveness and readiness use a separate listener on port `8081`:
 
 Metrics can be disabled independently without disabling health probes.
 
-## Autoscaling and lifecycle providers
+## Autoscaling, lifecycle, and endpoint providers
 
-The public process does not register DatadogMetric, WPA, or other external CRD schemes. If autoscaling is configured without an injected recommendation provider, reconciliation continues and reports `ProviderUnavailable` in status. Kubernetes termination and drain safety remain active; provider-specific lifecycle acknowledgement is opt-in and is not wired by the public startup.
+The reference binary does not register DatadogMetric, WPA, or other external CRD schemes. An embedding application can register provider CRDs in the runtime scheme passed to `ManageWithOptions` and set `ManageOptions.AutoscalingProvider`. If autoscaling is configured without a provider, reconciliation continues and reports `ProviderUnavailable` in status. Kubernetes termination and drain safety remain active without `ManageOptions.LifecycleAdapter`; an adapter adds an external acknowledgement protocol. `ManageOptions.PrimaryEndpointResolver` supports environments whose Redis clients use a hostname other than Kubernetes Service DNS, or use pod IPs only.
 
 ## Backups and restore
 
 Backups are beta and must remain disabled unless all prerequisites are supplied:
 
-- Set `backup.bucketName` and `spec.backupBackend` to `s3`, `gcs`, or `azure`.
+- For a built-in provider, set `backup.bucketName` and `spec.backupBackend`. The reference binary supports `s3`, `gcs`, and `azure`; AWS S3 is the default when the provider is omitted.
 - Add a `backup` sidecar to the Redis StatefulSet template with the corresponding `aws`, `gcloud`, or `az` CLI and cloud identity/credentials.
 - Mount the Redis data volume at the same path in the Redis and backup containers.
 - Configure Redis with `appendonly no` before using RDB restore. The operator
@@ -130,6 +180,10 @@ Backups are beta and must remain disabled unless all prerequisites are supplied:
   the AOF instead of the validated `dump.rdb`.
 - Grant the workload identity permission to read, write, copy, list, and delete objects in the selected bucket or container.
 - Complete the required security review of toolbox, authentication, backup artifact integrity, and credential handling.
+
+Applications embedding the controller may inject a `controller.BackupBackendFactory` or use `controller.NewBackupBackendRegistry` to add another provider while retaining S3, GCS, and Azure. The factory returns a trusted in-process `controller.BackupProvider`; binding it to the pod executor produces a typed `controller.BackupStore`. The controller calls operations such as `UploadFile`, `DownloadFile`, `CopyPrefix`, `DeletePrefix`, and `Exists`, without accepting command templates from the RedisCluster resource. CLI-backed stores may translate those operations internally through the fixed-argv pod executor, which never adds shell wrapping or logs its arguments. Credentials must be supplied through mounted files or stdin, not argv.
+
+Before using a custom provider name on an existing installation, apply the updated RedisCluster CRD. Helm does not replace CRDs from the chart's `crds/` directory during a normal upgrade.
 
 Successful backups rotate exactly two generations: the new complete backup is promoted to `latest`, and the former `latest` becomes `previous`. Restore tries `latest` first and can fall back to `previous`. `spec.backupRetention` is a deprecated compatibility field: it is unsupported and ignored, so it does not change the fixed current-plus-previous retention behavior.
 
@@ -150,7 +204,7 @@ portability.
 
 - Only Redis 8.6 and Kubernetes 1.33 are claimed as compatible.
 - The repository does not publish an image or chart during Phase 1.
-- No autoscaling recommendation provider or provider-specific lifecycle adapter is enabled by public startup.
+- The reference binary enables no autoscaling recommendation provider or provider-specific lifecycle adapter.
 - Primary downscale is not supported in the initial public release. Lowering `spec.primaries` does not lower the retained effective target or remove Redis pods.
 - Blue-green rollout qualification covers image changes. Other pod-template
   changes are detected and trigger the same rollout path, but do not yet have

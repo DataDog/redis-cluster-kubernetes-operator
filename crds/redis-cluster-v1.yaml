@@ -46,19 +46,19 @@ spec:
                 properties:
                   cpu:
                     description: RedisClusterAutoscalingMetricPolicy configures one
-                      WPA recommendation signal.
+                      autoscaling recommendation signal.
                     properties:
                       highWatermark:
                         anyOf:
                         - type: integer
                         - type: string
-                        description: HighWatermark is the absolute WPA threshold for
-                          the metric utilization ratio.
+                        description: HighWatermark is the utilization ratio above which
+                          scale-up may be recommended.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       upscaleDelaySeconds:
-                        description: UpscaleDelaySeconds is the WPA delay above the
-                          high watermark.
+                        description: UpscaleDelaySeconds is how long the signal must
+                          remain above HighWatermark before scale-up may be recommended.
                         format: int32
                         minimum: 0
                         type: integer
@@ -71,19 +71,19 @@ spec:
                     type: integer
                   memory:
                     description: RedisClusterAutoscalingMetricPolicy configures one
-                      WPA recommendation signal.
+                      autoscaling recommendation signal.
                     properties:
                       highWatermark:
                         anyOf:
                         - type: integer
                         - type: string
-                        description: HighWatermark is the absolute WPA threshold for
-                          the metric utilization ratio.
+                        description: HighWatermark is the utilization ratio above which
+                          scale-up may be recommended.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       upscaleDelaySeconds:
-                        description: UpscaleDelaySeconds is the WPA delay above the
-                          high watermark.
+                        description: UpscaleDelaySeconds is how long the signal must
+                          remain above HighWatermark before scale-up may be recommended.
                         format: int32
                         minimum: 0
                         type: integer
@@ -111,12 +111,10 @@ spec:
               backupBackend:
                 default: s3
                 description: |-
-                  BackupBackend selects the cloud storage backend: "s3" (AWS S3), "gcs" (Google Cloud Storage), "azure" (Azure Blob).
-                  Defaults to "s3" when unset.
-                enum:
-                - s3
-                - gcs
-                - azure
+                  BackupBackend selects the snapshot storage provider. The reference binary
+                  includes "s3", "gcs", and "azure"; embedders may register other names.
+                  Defaults to the built-in AWS S3 implementation when unset.
+                pattern: ^[a-z][a-z0-9.-]{0,62}$
                 type: string
               backupEnabled:
                 description: BackupEnabled enables or disables automatic backups (defaults
