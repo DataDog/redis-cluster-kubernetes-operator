@@ -1,3 +1,6 @@
+// Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 package controller
 
 import (
@@ -9,9 +12,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 )
 
+// BackendErrorKind classifies provider-independent backup failures.
 type BackendErrorKind string
 type backendProvider string
 
@@ -21,9 +26,10 @@ const (
 	BackendNetwork        BackendErrorKind = "network"
 	BackendFailure        BackendErrorKind = "backend"
 
-	backendS3    backendProvider = "s3"
-	backendGCS   backendProvider = "gcs"
-	backendAzure backendProvider = "azure"
+	backendS3             backendProvider = "s3"
+	backendGCS            backendProvider = "gcs"
+	backendAzure          backendProvider = "azure"
+	defaultBackupProvider                 = backendS3
 )
 
 // BackendError excludes provider output because it can contain credentials or signed URLs.
@@ -45,31 +51,138 @@ func IsBackendNotFound(err error) bool {
 	return errors.As(err, &backendErr) && backendErr.Kind == BackendNotFound
 }
 
+// BackendCommandResult contains the observable result of a provider command.
 type BackendCommandResult struct {
 	ExitCode int
 	Stdout   string
 	Stderr   string
 }
 
-type backendCommandTransportError struct{ Kind BackendErrorKind }
-
-func (e *backendCommandTransportError) Error() string {
-	return "object-store command transport failed (" + string(e.Kind) + ")"
-}
-
 // BackendCommandExecutor is pre-bound to one pod and container. Input is sent
 // only over stdin and must never be inserted into argv, request URLs, or logs.
+// A nonzero process exit is reported through BackendCommandResult; error is
+// reserved for failures to execute the command.
 type BackendCommandExecutor interface {
 	Execute(context.Context, []string, []byte) (BackendCommandResult, error)
 }
 
+// BackendCommandExecutorIdentity optionally identifies the execution environment
+// behind an executor. The value must be stable for executors that share process
+// state, such as multiple command sessions in the same pod and container.
+type BackendCommandExecutorIdentity interface {
+	BackendCommandExecutorID() string
+}
+
+// BackupProvider binds provider-specific object storage operations to the pod
+// and container selected by the controller. Custom providers only need to
+// implement this interface.
+type BackupProvider interface {
+	Bind(BackendCommandExecutor) BackupStore
+}
+
+// BackupBackend is the original built-in backend contract. URI is retained for
+// source compatibility; backup orchestration only requires BackupProvider.
 type BackupBackend interface {
-	Bind(BackendCommandExecutor) ObjectStore
+	BackupProvider
 	URI(string) (string, error)
 }
 
-// ObjectStore is the typed contract shared with U5.
-type ObjectStore interface {
+// BackupBackendFactory selects a storage implementation for a RedisCluster.
+// Applications embedding the controller can inject a registry or their own
+// factory without changing backup orchestration.
+type BackupBackendFactory interface {
+	NewBackupBackend(provider, location string) (BackupProvider, error)
+}
+
+// BackupBackendFactoryFunc adapts a function to BackupBackendFactory.
+type BackupBackendFactoryFunc func(provider, location string) (BackupProvider, error)
+
+func (f BackupBackendFactoryFunc) NewBackupBackend(provider, location string) (BackupProvider, error) {
+	if f == nil {
+		return nil, errors.New("backup backend factory is required")
+	}
+	return f(provider, location)
+}
+
+// BackupBackendProviderFunc constructs one provider-specific backend. Location
+// is the configured bucket, container, or equivalent provider value.
+type BackupBackendProviderFunc func(location string) (BackupProvider, error)
+
+// BackupBackendRegistry is a concurrency-safe provider registry. Register
+// providers during process construction, then inject it into the reconciler.
+type BackupBackendRegistry struct {
+	mu        sync.RWMutex
+	providers map[string]BackupBackendProviderFunc
+}
+
+// NewBackupBackendRegistry creates a registry with the built-in S3, GCS, and
+// Azure providers. An unset provider uses the public API default name, s3.
+func NewBackupBackendRegistry() *BackupBackendRegistry {
+	return &BackupBackendRegistry{providers: map[string]BackupBackendProviderFunc{
+		string(backendS3): func(location string) (BackupProvider, error) {
+			return NewAWSBackupBackend(location)
+		},
+		string(backendGCS): func(location string) (BackupProvider, error) {
+			return NewGCSBackupBackend(location)
+		},
+		string(backendAzure): func(location string) (BackupProvider, error) {
+			return NewAzureBackupBackend(location)
+		},
+	}}
+}
+
+// Register adds a provider without replacing an existing registration.
+func (r *BackupBackendRegistry) Register(name string, provider BackupBackendProviderFunc) error {
+	if r == nil {
+		return errors.New("backup backend registry is required")
+	}
+	if !backupProviderNameRE.MatchString(name) {
+		return fmt.Errorf("invalid backup provider name %q", name)
+	}
+	if provider == nil {
+		return fmt.Errorf("backup provider %q is nil", name)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.providers == nil {
+		r.providers = make(map[string]BackupBackendProviderFunc)
+	}
+	if _, found := r.providers[name]; found {
+		return fmt.Errorf("backup provider %q is already registered", name)
+	}
+	r.providers[name] = provider
+	return nil
+}
+
+// NewBackupBackend constructs the selected provider for a location.
+func (r *BackupBackendRegistry) NewBackupBackend(provider, location string) (BackupProvider, error) {
+	if r == nil {
+		return nil, errors.New("backup backend registry is required")
+	}
+	if provider == "" {
+		provider = string(defaultBackupProvider)
+	}
+	r.mu.RLock()
+	constructor := r.providers[provider]
+	r.mu.RUnlock()
+	if constructor == nil {
+		return nil, fmt.Errorf("unknown backup provider %q", provider)
+	}
+	backend, err := constructor(location)
+	if err != nil {
+		return nil, err
+	}
+	if optionalProviderIsNil(backend) {
+		return nil, fmt.Errorf("backup provider %q returned a nil backend", provider)
+	}
+	return backend, nil
+}
+
+// BackupStore is the typed storage contract used by backup and restore. The
+// controller calls these operations and does not accept provider command
+// templates. CLI-backed implementations may use BackendCommandExecutor
+// internally to translate an operation into fixed argv.
+type BackupStore interface {
 	UploadFile(context.Context, string, string) error
 	DownloadFile(context.Context, string, string) error
 	UploadBytes(context.Context, []byte, string) error
@@ -79,33 +192,39 @@ type ObjectStore interface {
 	Exists(context.Context, string) (bool, error)
 }
 
-func newBackupBackend(kind, bucket string) (BackupBackend, error) {
-	switch kind {
-	case "", "s3":
-		if err := validateS3Bucket(bucket); err != nil {
-			return nil, err
-		}
-		return &s3Backend{bucket: bucket}, nil
-	case "gcs":
-		if err := validateGCSBucket(bucket); err != nil {
-			return nil, err
-		}
-		return &gcsBackend{bucket: bucket}, nil
-	case "azure":
-		if err := validateAzureContainer(bucket); err != nil {
-			return nil, err
-		}
-		return &azureBackend{container: bucket}, nil
-	default:
-		return nil, fmt.Errorf("unknown backup backend %q", kind)
+// ObjectStore is retained as an alias for source compatibility.
+type ObjectStore = BackupStore
+
+// NewAWSBackupBackend constructs the built-in AWS S3 implementation.
+func NewAWSBackupBackend(bucket string) (BackupBackend, error) {
+	if err := validateS3Bucket(bucket); err != nil {
+		return nil, err
 	}
+	return &s3Backend{bucket: bucket}, nil
+}
+
+// NewGCSBackupBackend constructs the built-in Google Cloud Storage implementation.
+func NewGCSBackupBackend(bucket string) (BackupBackend, error) {
+	if err := validateGCSBucket(bucket); err != nil {
+		return nil, err
+	}
+	return &gcsBackend{bucket: bucket}, nil
+}
+
+// NewAzureBackupBackend constructs the built-in Azure Blob implementation.
+func NewAzureBackupBackend(container string) (BackupBackend, error) {
+	if err := validateAzureContainer(container); err != nil {
+		return nil, err
+	}
+	return &azureBackend{container: container}, nil
 }
 
 var (
-	s3BucketRE    = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
-	gcsBucketRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*[a-z0-9]$`)
-	azureBucketRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
-	unsafePathRE  = regexp.MustCompile("[;&|$><`'\"*?\\[\\]{}()!]")
+	s3BucketRE           = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+	gcsBucketRE          = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*[a-z0-9]$`)
+	azureBucketRE        = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
+	backupProviderNameRE = regexp.MustCompile(`^[a-z][a-z0-9.-]{0,62}$`)
+	unsafePathRE         = regexp.MustCompile("[;&|$><`'\"*?\\[\\]{}()!]")
 )
 
 func validateS3Bucket(name string) error {
@@ -176,7 +295,7 @@ func validateLocalPath(value string) error {
 func classifyBackendFailure(provider backendProvider, operation string, result BackendCommandResult, execErr error) error {
 	if execErr != nil {
 		kind := BackendFailure
-		var transportErr *backendCommandTransportError
+		var transportErr *BackendError
 		if errors.As(execErr, &transportErr) {
 			kind = transportErr.Kind
 		}
@@ -208,12 +327,7 @@ func runCommand(ctx context.Context, provider backendProvider, executor BackendC
 	if executor == nil {
 		return BackendCommandResult{}, &BackendError{Kind: BackendFailure, Operation: operation}
 	}
-	var inputCopy []byte
-	if input != nil {
-		inputCopy = make([]byte, len(input))
-		copy(inputCopy, input)
-	}
-	result, err := executor.Execute(ctx, append([]string(nil), command...), inputCopy)
+	result, err := executor.Execute(ctx, command, input)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return result, err
 	}
@@ -229,7 +343,7 @@ type s3Store struct {
 	executor BackendCommandExecutor
 }
 
-func (b *s3Backend) Bind(e BackendCommandExecutor) ObjectStore {
+func (b *s3Backend) Bind(e BackendCommandExecutor) BackupStore {
 	return &s3Store{backend: b, executor: e}
 }
 func (b *s3Backend) URI(p string) (string, error) {
@@ -318,7 +432,7 @@ type gcsStore struct {
 	executor BackendCommandExecutor
 }
 
-func (b *gcsBackend) Bind(e BackendCommandExecutor) ObjectStore {
+func (b *gcsBackend) Bind(e BackendCommandExecutor) BackupStore {
 	return &gcsStore{backend: b, executor: e}
 }
 func (b *gcsBackend) URI(p string) (string, error) {
@@ -398,14 +512,37 @@ func (s *gcsStore) Exists(ctx context.Context, p string) (bool, error) {
 	return strings.TrimSpace(result.Stdout) != "", nil
 }
 
-type azureBackend struct{ container string }
+type azureBackend struct {
+	container string
+	// Executors without an identity use the conservative shared lock. Identified
+	// executors share a lock only when they address the same pod and container.
+	authMu    sync.Mutex
+	authMuMap sync.Map
+}
 type azureStore struct {
 	backend  *azureBackend
 	executor BackendCommandExecutor
+	authMu   *sync.Mutex
 }
 
-func (b *azureBackend) Bind(e BackendCommandExecutor) ObjectStore {
-	return &azureStore{backend: b, executor: e}
+func (b *azureBackend) Bind(e BackendCommandExecutor) BackupStore {
+	return &azureStore{backend: b, executor: e, authMu: b.authLock(e)}
+}
+func (b *azureBackend) authLock(e BackendCommandExecutor) *sync.Mutex {
+	identified, ok := e.(BackendCommandExecutorIdentity)
+	if !ok {
+		return &b.authMu
+	}
+	identity := identified.BackendCommandExecutorID()
+	if identity == "" {
+		return &b.authMu
+	}
+	lock, _ := b.authMuMap.LoadOrStore(identity, &sync.Mutex{})
+	mutex, ok := lock.(*sync.Mutex)
+	if !ok {
+		return &b.authMu
+	}
+	return mutex
 }
 func (b *azureBackend) URI(p string) (string, error) {
 	if err := validateRemotePath(p); err != nil {
@@ -421,6 +558,9 @@ func (s *azureStore) run(ctx context.Context, operation string, args []string, i
 	return runCommand(ctx, backendAzure, s.executor, operation, append([]string{"env", "AZURE_CONFIG_DIR=/tmp/.azure", "az"}, args...), input)
 }
 func (s *azureStore) runAuthenticated(ctx context.Context, operation string, args []string, input []byte) (BackendCommandResult, error) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+
 	if err := s.login(ctx); err != nil {
 		return BackendCommandResult{}, err
 	}
@@ -457,13 +597,16 @@ func (s *azureStore) DownloadBytes(ctx context.Context, remote string) ([]byte, 
 	if err := validateRemotePath(remote); err != nil {
 		return nil, err
 	}
-	result, err := s.runAuthenticated(ctx, "download", []string{"storage", "blob", "download", "--auth-mode", "login", "--container-name", s.backend.container, "--name", remote, "--only-show-errors"}, nil)
+	result, err := s.runAuthenticated(ctx, "download", []string{"storage", "blob", "download", "--auth-mode", "login", "--overwrite", "true", "--container-name", s.backend.container, "--name", remote, "--file", "/dev/stdout", "--max-connections", "1", "--output", "none", "--only-show-errors"}, nil)
 	return []byte(result.Stdout), err
 }
 func (s *azureStore) DeletePrefix(ctx context.Context, p string) error {
 	if err := validateRemotePath(p); err != nil {
 		return err
 	}
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+
 	if err := s.login(ctx); err != nil {
 		return err
 	}
@@ -492,6 +635,9 @@ func (s *azureStore) CopyPrefix(ctx context.Context, src, dst string) error {
 	if err := validateRemotePath(dst); err != nil {
 		return err
 	}
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+
 	if err := s.login(ctx); err != nil {
 		return err
 	}

@@ -1,3 +1,6 @@
+// Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 package redis_cluster
 
 import (
@@ -581,6 +584,21 @@ func TestToolboxRunObjectStoreCommandKeepsPayloadOutOfCommand(t *testing.T) {
 	require.Len(t, calls, 1)
 	assert.Equal(t, payload, calls[0].Stdin)
 	assert.NotContains(t, strings.Join(calls[0].Command, " "), string(payload))
+}
+
+func TestToolboxRunBackupCommandSupportsCustomFixedArgv(t *testing.T) {
+	stub := toolbox.New().OnCommand("custom", func(_, _ string, cmd []string) bool {
+		return len(cmd) > 0 && cmd[0] == "rclone"
+	}, toolbox.OK())
+	tb := newToolboxWithStub(stub)
+	payload := []byte("manifest")
+	command := []string{"rclone", "copyto", "-", "remote:backup/manifest.json"}
+
+	_, _, _, err := tb.RunBackupCommand(context.Background(), &ClusterNode{PodName: "redis-0"}, constants.BackupContainerName, command, payload)
+	require.NoError(t, err)
+	require.Len(t, stub.Calls(), 1)
+	assert.Equal(t, command, stub.Calls()[0].Command)
+	assert.Equal(t, payload, stub.Calls()[0].Stdin)
 }
 
 func TestToolboxRunObjectStoreCommandRejectsUnknownExecutionTargets(t *testing.T) {

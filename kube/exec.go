@@ -1,3 +1,6 @@
+// Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 package kube
 
 import (
@@ -78,13 +81,29 @@ func redactCommand(command []string) []string {
 	return out
 }
 
-func execStreamFailure(log logr.Logger, err error, _ string, _ string) error {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
+func execTransportFailure(log logr.Logger, err error, operation string, exposeDetails bool) error {
+	if errors.Is(err, context.Canceled) {
+		if exposeDetails {
+			return err
+		}
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		if exposeDetails {
+			return err
+		}
+		return context.DeadlineExceeded
 	}
 	execErr := newExecError(err)
-	log.Error(execErr, "Failed exec.Stream", "err", reflect.TypeOf(err))
-	return utils.WrapErr(execErr, "failed exec.Stream")
+	if !exposeDetails {
+		execErr.cause = errors.New("exec transport error (details omitted)")
+	}
+	log.Error(execErr, "Failed "+operation, "err", reflect.TypeOf(err))
+	return utils.WrapErr(execErr, "failed "+operation)
+}
+
+func execStreamFailure(log logr.Logger, err error, _ string, _ string, exposeDetails bool) error {
+	return execTransportFailure(log, err, "exec.Stream", exposeDetails)
 }
 
 // Exec provides support for executing k8s commands.
@@ -113,24 +132,24 @@ func NewKubeExec(config *rest.Config, namespace string, log logr.Logger) (*Exec,
 
 // ExecNC executes a command on a specific pod and wait for the command's output.
 func (c *Exec) ExecNC(ctx context.Context, podName string, command []string, log logr.Logger) (int, string, string, error) {
-	return c.exec(ctx, podName, "", command, nil, log)
+	return c.exec(ctx, podName, "", command, nil, log, true)
 }
 
 // Exec executes a command on a specific pod and container and wait for the command's output.
 func (c *Exec) Exec(ctx context.Context, podName string, containerName string, command []string, log logr.Logger) (int, string, string, error) {
-	return c.exec(ctx, podName, containerName, command, nil, log)
+	return c.exec(ctx, podName, containerName, command, nil, log, true)
 }
 
 // ExecWithInput executes a fixed argv command and transports payload only over
-// stdin. The payload is never included in command logging or the exec request URL.
+// stdin. Arguments are summarized rather than logged, and the payload is never
+// included in command logging or the exec request URL.
 func (c *Exec) ExecWithInput(ctx context.Context, podName, containerName string, command []string, input []byte, log logr.Logger) (int, string, string, error) {
-	return c.exec(ctx, podName, containerName, command, input, log)
+	return c.exec(ctx, podName, containerName, command, input, log, false)
 }
 
 // Executes a command on a specific pod and optional container and wait for the command's output.
-func (c *Exec) exec(ctx context.Context, podName string, containerName string, command []string, input []byte, log logr.Logger) (int, string, string, error) {
-	xlog := utils.XLog(log)
-	xlog.Debug("Execute command", "podName", podName, "containerName", containerName, "command", redactCommand(command))
+func (c *Exec) exec(ctx context.Context, podName string, containerName string, command []string, input []byte, log logr.Logger, logArguments bool) (int, string, string, error) {
+	logExecCommand(log, podName, containerName, command, logArguments)
 
 	req := c.clientSet.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -150,9 +169,7 @@ func (c *Exec) exec(ctx context.Context, podName string, containerName string, c
 
 	exec, err := remotecommand.NewSPDYExecutor(c.config, "POST", req.URL())
 	if err != nil {
-		execErr := newExecError(err)
-		log.Error(execErr, "Failed remotecommand.NewSPDYExecutor")
-		return 0, "", "", utils.WrapErr(execErr, "failed remotecommand.NewSPDYExecutor")
+		return 0, "", "", execTransportFailure(log, err, "remotecommand.NewSPDYExecutor", logArguments)
 	}
 
 	var stdout, stderr strings.Builder
@@ -178,12 +195,27 @@ func (c *Exec) exec(ctx context.Context, podName string, containerName string, c
 		} else {
 			// Captured output can contain streamed manifests or provider-sensitive
 			// diagnostics. The failure helper deliberately ignores both streams.
-			return 0, "", "", execStreamFailure(log, err, strout, strerr)
+			return 0, "", "", execStreamFailure(log, err, strout, strerr, logArguments)
 		}
 	}
 
 	// xlog.Debug("Executed command", "stdout", strout, "stderr", strerr, "rc", rc)
 	return rc, strout, strerr, nil
+}
+
+func logExecCommand(log logr.Logger, podName, containerName string, command []string, logArguments bool) {
+	xlog := utils.XLog(log)
+	if logArguments {
+		xlog.Debug("Execute command", "podName", podName, "containerName", containerName, "command", redactCommand(command))
+		return
+	}
+	executable := ""
+	argumentCount := 0
+	if len(command) > 0 {
+		executable = command[0]
+		argumentCount = len(command) - 1
+	}
+	xlog.Debug("Execute command", "podName", podName, "containerName", containerName, "executable", executable, "argumentCount", argumentCount)
 }
 
 func podExecOptions(command []string) *v1.PodExecOptions {

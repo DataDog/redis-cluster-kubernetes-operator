@@ -1,3 +1,6 @@
+// Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 package metrics
 
 import (
@@ -18,6 +21,25 @@ func TestPrometheusRegistersWithIndependentRegistries(t *testing.T) {
 		families, err := registry.Gather()
 		require.NoError(t, err)
 		require.Contains(t, metricFamiliesByName(families), "redis_cluster_operator_health")
+	}
+}
+
+func TestPrometheusCleanupAllowsRegistrationWithSameRegistry(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	for range 2 {
+		m, cleanup, err := CreatePrometheusWithCleanup(registry)
+		require.NoError(t, err)
+		require.NotNil(t, m)
+
+		families, err := registry.Gather()
+		require.NoError(t, err)
+		require.Contains(t, metricFamiliesByName(families), "redis_cluster_operator_health")
+
+		cleanup()
+		cleanup()
+		families, err = registry.Gather()
+		require.NoError(t, err)
+		require.NotContains(t, metricFamiliesByName(families), "redis_cluster_operator_health")
 	}
 }
 

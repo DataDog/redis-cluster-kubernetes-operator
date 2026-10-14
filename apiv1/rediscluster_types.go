@@ -1,3 +1,6 @@
+// Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 package v1
 
 import (
@@ -28,9 +31,10 @@ type RedisClusterSpec struct {
 	// BackupRetention is retained for API compatibility.
 	// Deprecated: backup retention is unsupported and this field is ignored.
 	BackupRetention int32 `json:"backupRetention,omitempty"`
-	// BackupBackend selects the cloud storage backend: "s3" (AWS S3), "gcs" (Google Cloud Storage), "azure" (Azure Blob).
-	// Defaults to "s3" when unset.
-	// +kubebuilder:validation:Enum=s3;gcs;azure
+	// BackupBackend selects the snapshot storage provider. The reference binary
+	// includes "s3", "gcs", and "azure"; embedders may register other names.
+	// Defaults to the built-in AWS S3 implementation when unset.
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9.-]{0,62}$`
 	// +kubebuilder:default=s3
 	BackupBackend string `json:"backupBackend,omitempty"`
 	// StatefulsetTemplate is the template of the statefulset for the redis cluster
@@ -64,11 +68,12 @@ const (
 	RedisClusterConditionDegraded    RedisClusterConditionType = "Degraded"
 )
 
-// RedisClusterAutoscalingMetricPolicy configures one WPA recommendation signal.
+// RedisClusterAutoscalingMetricPolicy configures one autoscaling recommendation signal.
 type RedisClusterAutoscalingMetricPolicy struct {
-	// HighWatermark is the absolute WPA threshold for the metric utilization ratio.
+	// HighWatermark is the utilization ratio above which scale-up may be recommended.
 	HighWatermark resource.Quantity `json:"highWatermark"`
-	// UpscaleDelaySeconds is the WPA delay above the high watermark.
+	// UpscaleDelaySeconds is how long the signal must remain above HighWatermark
+	// before scale-up may be recommended.
 	// +kubebuilder:validation:Minimum=0
 	UpscaleDelaySeconds *int32 `json:"upscaleDelaySeconds,omitempty"`
 }

@@ -1,3 +1,6 @@
+// Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 package controller
 
 import (
@@ -482,7 +485,7 @@ func assignAllSlots(ctx context.Context, cluster *redis_cluster.Cluster, primary
 	return true, true, nil
 }
 
-func (r *RedisClusterReconciler) prepareLostSlotRestore(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupBackend, path string) (map[int]string, *BackupManifest, error) {
+func (r *RedisClusterReconciler) prepareLostSlotRestore(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupProvider, path string) (map[int]string, *BackupManifest, error) {
 	coverage, manifest, err := r.backupSlotCoverage(cluster, path)
 	if err != nil {
 		return nil, nil, err

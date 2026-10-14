@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 # Fail closed before uploading clean-room failure artifacts.
 
 set -euo pipefail
@@ -8,7 +11,7 @@ readonly ARTIFACT_DIR="${1:-cleanroom-artifacts}"
 quiet_match() {
   local status=0
 
-  rg --quiet --hidden "$@" -- "$ARTIFACT_DIR" >/dev/null 2>&1 || status=$?
+  grep -E -r -a -q "$@" -- "$ARTIFACT_DIR" >/dev/null 2>&1 || status=$?
   case "$status" in
     0) return 0 ;;
     1) return 1 ;;
@@ -19,12 +22,47 @@ quiet_match() {
   esac
 }
 
+contains_unredacted_credential() {
+  local -a statuses
+  local credential_field
+  credential_field="(^|[^[:alnum:]_])[\"']?(password|rediscli_auth)[\"']?[[:space:]]*[=:][[:space:]]*"
+
+  # Use tools and POSIX regular expressions available on standard CI runners.
+  # awk consumes the complete stream, so a detected match cannot leave grep
+  # with a misleading broken-pipe status.
+  set +e
+  grep -E -r -a -h -i "$credential_field" -- "$ARTIFACT_DIR" 2>/dev/null |
+    awk -v field="$credential_field" '
+      BEGIN {
+        redacted = field "[\"\047]?[[]redacted[]][\"\047]?([,}]|[[:space:]]|$)"
+      }
+      {
+        line = tolower($0)
+        while (match(line, redacted)) {
+          line = substr(line, 1, RSTART - 1) " " substr(line, RSTART + RLENGTH)
+        }
+        if (line ~ field) {
+          unsafe = 1
+        }
+      }
+      END { exit unsafe ? 0 : 1 }
+    ' >/dev/null 2>&1
+  statuses=("${PIPESTATUS[@]}")
+  set -e
+
+  if ((statuses[0] > 1 || statuses[1] > 1)); then
+    echo "artifact safety scan failed" >&2
+    exit 1
+  fi
+  [[ "${statuses[0]}" -eq 0 && "${statuses[1]}" -eq 0 ]]
+}
+
 if [[ ! -d "$ARTIFACT_DIR" ]]; then
   echo "safe=true" >>"${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
   exit 0
 fi
 
-if quiet_match --pcre2 -i '(^|[^[:alnum:]_])(password|rediscli_auth)[=:][[:space:]]*(?>["\x27]?)(?!\[REDACTED\](?>["\x27]?)(?:[,}]|[[:space:]]|$))[^[:space:]]+'; then
+if contains_unredacted_credential; then
   echo "refusing to upload an artifact containing an unredacted credential field" >&2
   exit 1
 fi

@@ -1,3 +1,6 @@
+// Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 package controller
 
 import (
@@ -37,6 +40,7 @@ type RedisClustersReconciler struct {
 	AutoscalingProvider      AutoscalingProvider
 	LifecycleAdapter         LifecycleAdapter
 	PrimaryEndpointResolver  PrimaryEndpointResolver
+	BackupBackendFactory     BackupBackendFactory
 	notFoundCache            sync.Map // key: NamespacedName string, value: time.Time
 	primaryEndpointReadiness primaryEndpointReadinessTracker
 }
@@ -47,6 +51,7 @@ type RedisClusterReconciler struct {
 	AutoscalingProvider      AutoscalingProvider
 	LifecycleAdapter         LifecycleAdapter
 	PrimaryEndpointResolver  PrimaryEndpointResolver
+	BackupBackendFactory     BackupBackendFactory
 	notFoundCache            *sync.Map
 	primaryEndpointReadiness *primaryEndpointReadinessTracker
 	primaryEndpointProber    primaryEndpointProber
@@ -134,6 +139,7 @@ func (r *RedisClustersReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		AutoscalingProvider:      r.AutoscalingProvider,
 		LifecycleAdapter:         r.LifecycleAdapter,
 		PrimaryEndpointResolver:  r.PrimaryEndpointResolver,
+		BackupBackendFactory:     r.BackupBackendFactory,
 		notFoundCache:            &r.notFoundCache,
 		primaryEndpointReadiness: &r.primaryEndpointReadiness,
 	}

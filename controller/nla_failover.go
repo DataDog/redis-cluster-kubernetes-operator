@@ -1,3 +1,6 @@
+// Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 package controller
 
 import (
@@ -48,8 +51,8 @@ type LifecyclePodState struct {
 }
 
 // DatadogNLAAdapter enables the legacy Datadog Node Lifecycle Automation
-// recognition and acknowledgement protocol. It is opt-in and is not installed
-// by the public operator startup path.
+// recognition and acknowledgement protocol. It is opt-in and the reference
+// binary does not install it.
 type DatadogNLAAdapter struct{}
 
 func (DatadogNLAAdapter) PodState(pod *v1.Pod) (LifecyclePodState, error) {

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
+
 
 set -euo pipefail
 
@@ -71,6 +74,26 @@ expect_rejected_without_disclosure \
   "credential-field" \
   "field-secret-$HEX36" \
   "password=field-secret-$HEX36"
+
+expect_rejected_without_disclosure \
+  "json-credential-field" \
+  "json-secret-$HEX36" \
+  "{\"password\":\"json-secret-$HEX36\"}"
+
+expect_rejected_without_disclosure \
+  "multiline-json-credential-field" \
+  "multiline-json-secret-$HEX36" \
+  $'{\n  "password":\n  "multiline-json-secret-'"$HEX36"$'"\n}'
+
+expect_rejected_without_disclosure \
+  "multiline-yaml-credential-field" \
+  "multiline-yaml-secret-$HEX36" \
+  $'rediscli_auth:\n  multiline-yaml-secret-'"$HEX36"
+
+expect_rejected_without_disclosure \
+  "mixed-redacted-and-unredacted-credential-fields" \
+  "real-secret" \
+  "user=x password=[REDACTED] password=real-secret"
 
 for prefix in cleanroom- p- wrong- missing-; do
   expect_rejected_without_disclosure \
