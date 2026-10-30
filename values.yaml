@@ -52,7 +52,7 @@ operator:
 toolbox:
   image:
     repository: redis
-    tag: "8.6.0"
+    tag: "8.10.0"
     pullPolicy: IfNotPresent
   serviceAccount:
     create: true
