@@ -134,23 +134,29 @@ func (s *Suite) GetCluster(t *testing.T, name string) *cachev1.RedisCluster {
 	return rc
 }
 
-// TriggerBlueGreen makes a rollout due: the operator triggers BG on a spec change
-// (computeSpecHash hashes pod-template annotations), not on chart_version alone.
+// TriggerBlueGreen makes a rollout due: the operator triggers BG on a persisted
+// pod spec change, not on chart_version alone.
 func (s *Suite) TriggerBlueGreen(t *testing.T, name string) {
 	t.Helper()
-	// On a fresh cluster the operator adopts the current spec as its baseline
-	// LastAppliedSpecHash on the first post-Ready reconcile. Triggering before
-	// that stamp folds the trigger annotation into the baseline, so the rollout
-	// never starts — wait for the baseline first.
+	// Wait for LastAppliedSpecHash before changing the pod template. Otherwise the
+	// first post-Ready reconcile adopts the change as its baseline and no rollout starts.
 	s.waitSpecHashStamped(t, name)
 	v := "e2e-bg-" + time.Now().Format("150405.000")
 	rc := s.GetCluster(t, name)
 	setChartVersion(rc, v)
-	tpl := &rc.Spec.StatefulsetTemplate.Spec.Template
-	if tpl.Annotations == nil {
-		tpl.Annotations = map[string]string{}
+	redisContainer := &rc.Spec.StatefulsetTemplate.Spec.Template.Spec.Containers[0]
+	updated := false
+	for i := range redisContainer.Env {
+		if redisContainer.Env[i].Name == "E2E_BLUE_GREEN_TRIGGER" {
+			redisContainer.Env[i].Value = v
+			redisContainer.Env[i].ValueFrom = nil
+			updated = true
+			break
+		}
 	}
-	tpl.Annotations["e2e.redis.example.com/bg-trigger"] = v
+	if !updated {
+		redisContainer.Env = append(redisContainer.Env, corev1.EnvVar{Name: "E2E_BLUE_GREEN_TRIGGER", Value: v})
+	}
 	require.NoError(t, s.Fixture.Client.Update(s.Ctx, rc))
 }
 

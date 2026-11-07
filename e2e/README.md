@@ -92,6 +92,8 @@ E2E_SLOW=1 E2E_BUILD_LOADGEN=1 ci/dev-e2e.sh -run '^TestE2E_ForceCutover$'
 
 The wrapper requires Docker, KIND, `kubectl`, and Go. It reuses or creates the
 named KIND cluster, applies the CRD, and defaults to the public Redis 8.6 image.
+Use `KIND_E2E_REDIS_IMAGE=valkey/valkey:8.1.11` to run the same lane against
+the qualified Valkey image.
 
 Run the fast lane-wiring guard from the repository root:
 
@@ -102,8 +104,9 @@ go test ./e2e
 Local and CI execution use ordinary `go test` commands. Pull requests run the
 small in-process `smoke` lane as a diagnostic alongside the required packaged
 operator clean-room smoke. The daily schedule and manual workflow run the four
-complete in-process lanes independently against Kubernetes 1.33 and Redis 8.6;
-separate jobs run every deployed-operator clean-room lane in fresh clusters.
+complete in-process lanes independently against Kubernetes 1.33, Redis 8.6.0,
+and Valkey 8.1.11; separate jobs run every deployed-operator clean-room lane
+in fresh clusters.
 
 ## Add a test
 

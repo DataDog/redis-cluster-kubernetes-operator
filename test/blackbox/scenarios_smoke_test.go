@@ -35,8 +35,8 @@ func TestCleanroom_ReferenceInstall(t *testing.T) {
 		t.Fatalf("Redis pod count=%d, want 6", len(pods))
 	}
 	for _, pod := range pods {
-		if !strings.Contains(pod.Spec.Containers[0].Image, "redis:8.6.0") {
-			t.Errorf("pod %s image=%q, want Redis 8.6.0", pod.Name, pod.Spec.Containers[0].Image)
+		if pod.Spec.Containers[0].Image != h.redisImage {
+			t.Errorf("pod %s image=%q, want %q", pod.Name, pod.Spec.Containers[0].Image, h.redisImage)
 		}
 		size, err := h.exec(h.ctx, pod.Namespace, pod.Name, "redis", []string{"stat", "-c", "%s", "/data/nodes.conf"})
 		if err != nil || size == "" || size == "0" {
