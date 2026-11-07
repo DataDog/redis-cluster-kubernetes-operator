@@ -89,6 +89,7 @@ printf '%s\n' \
   "cluster_name=$CLUSTER_NAME" \
   "context=$CONTEXT" \
   "operator_image=$OPERATOR_IMAGE" \
+  "redis_image=$CLEANROOM_REDIS_IMAGE" \
   >"$RESOURCE_STATE"
 
 export CLEANROOM_PROVIDER=kind

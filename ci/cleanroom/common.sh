@@ -73,6 +73,27 @@ cleanroom_verify_context() {
     "refusing Kubernetes context '$actual_context'; expected '$expected_context'"
 }
 
+cleanroom_render_reference_workload() {
+  local manifest="$1"
+  local redis_image="$2"
+
+  [[ "$redis_image" =~ ^[A-Za-z0-9._/:@-]+$ ]] || cleanroom_die \
+    "invalid CLEANROOM_REDIS_IMAGE '$redis_image'"
+  awk -v image="$redis_image" '
+    $1 == "image:" && $2 == "redis:8.6.0" {
+      sub(/redis:8\.6\.0/, image)
+      replacements++
+    }
+    { print }
+    END {
+      if (replacements != 1) {
+        print "expected exactly one Redis image in the reference workload; found " replacements > "/dev/stderr"
+        exit 1
+      }
+    }
+  ' "$manifest"
+}
+
 cleanroom_collect_failure_artifacts() {
   local kubeconfig="$1"
   local destination="$2"
@@ -116,6 +137,7 @@ cleanroom_install_public_chart() {
   local image_repository="$4"
   local image_tag="$5"
   local pull_policy="$6"
+  local redis_image="${CLEANROOM_REDIS_IMAGE:-redis:8.6.0}"
 
   kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
   helm upgrade --install "$release" "$repo_root" \
@@ -125,7 +147,8 @@ cleanroom_install_public_chart() {
     --set-string operator.image.pullPolicy="$pull_policy" \
     --wait \
     --timeout "${CLEANROOM_HELM_TIMEOUT:-10m}"
-  kubectl apply -f "$repo_root/examples/redis-cluster.yaml"
+  export CLEANROOM_REDIS_IMAGE="$redis_image"
+  cleanroom_render_reference_workload "$repo_root/examples/redis-cluster.yaml" "$redis_image" | kubectl apply -f -
 }
 
 cleanroom_run_tests() {

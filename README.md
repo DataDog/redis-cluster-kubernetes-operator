@@ -4,7 +4,7 @@ A Kubernetes operator for coordinating the lifecycle and topology of Redis Clust
 
 The Redis operators we evaluated did not provide the same combination of Kubernetes lifecycle coordination, Redis Cluster topology management, and failure recovery capabilities.
 
-> **Beta:** the initial compatibility target is Redis 8.6 on Kubernetes 1.33 only. Other versions have not been qualified.
+> **Beta:** the compatibility targets are Redis 8.6.0 and Valkey 8.1.11 on Kubernetes 1.33. Other versions and Redis-to-Valkey migrations have not been qualified.
 
 ## Features
 
@@ -202,13 +202,11 @@ portability.
 
 ## Beta limitations
 
-- Only Redis 8.6 and Kubernetes 1.33 are claimed as compatible.
+- Redis 8.6.0 and Valkey 8.1.11 on Kubernetes 1.33 are the qualified compatibility targets.
+- Blue-green rollout is qualified for persisted pod-template changes within one engine. Redis-to-Valkey and Valkey-to-Redis migrations are not supported.
 - The repository does not publish an image or chart during Phase 1.
 - The reference binary enables no autoscaling recommendation provider or provider-specific lifecycle adapter.
 - Primary downscale is not supported in the initial public release. Lowering `spec.primaries` does not lower the retained effective target or remove Redis pods.
-- Blue-green rollout qualification covers image changes. Other pod-template
-  changes are detected and trigger the same rollout path, but do not yet have
-  dedicated deployed-operator qualification scenarios.
 - Backup deployment is not provided by the reference workload and requires the prerequisites above.
 - The Phase 1 toolbox remains present. Its Redis operations are typed, but removal of the toolbox is future work.
 - `RedisCluster` resources are namespaced. The CRD definition is cluster-wide and shared by all releases, so coordinate CRD upgrades when installing multiple namespace-scoped controllers.
@@ -237,14 +235,20 @@ make verify-license-inventory
 
 The public qualification path builds the operator from this repository,
 creates a fresh Kubernetes 1.33 cluster, installs only this repository's
-chart, and reconciles Redis 8.6 through the packaged operator Deployment. It
-does not use dd-source, an internal chart, a private registry, or a
-pre-existing operator installation.
+chart, and reconciles Redis 8.6.0 or Valkey 8.1.11 through the packaged
+operator Deployment. It does not use dd-source, an internal chart, a private
+registry, or a pre-existing operator installation.
 
 Local prerequisites are Docker, Go, KIND v0.30.0 or newer, `kubectl`, and Helm 3. Install the same KIND version used by CI with `go install sigs.k8s.io/kind@v0.30.0`. From the repository root, the complete smoke path is one command:
 
 ```sh
 ci/run-cleanroom.sh kind smoke
+```
+
+The default workload uses Redis. Select the qualified Valkey image explicitly:
+
+```sh
+CLEANROOM_REDIS_IMAGE=valkey/valkey:8.1.11 ci/run-cleanroom.sh kind smoke
 ```
 
 The runner creates a dedicated four-node KIND cluster, builds and loads the

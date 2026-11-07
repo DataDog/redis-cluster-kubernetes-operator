@@ -14,6 +14,7 @@ import (
 
 	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -87,7 +88,10 @@ func TestCleanroom_BlueGreenAvailability(t *testing.T) {
 		}
 		rc.Labels["chart_version"] = trigger
 		redisContainer := &rc.Spec.StatefulsetTemplate.Spec.Template.Spec.Containers[0]
-		redisContainer.Image = "docker.io/library/redis:8.6.0"
+		redisContainer.Env = append(redisContainer.Env, corev1.EnvVar{
+			Name:  "CLEANROOM_BLUE_GREEN_TRIGGER",
+			Value: trigger,
+		})
 	})
 
 	deadline := time.Now().Add(readyTimeout)
@@ -154,7 +158,54 @@ func TestCleanroom_BlueGreenAvailability(t *testing.T) {
 	if len(sets.Items) != 1 {
 		t.Fatalf("active StatefulSet count=%d, want 1", len(sets.Items))
 	}
+	h.assertBlueGreenTemplateApplied(s, trigger)
 	h.verifyData(s)
+}
+
+func (h *harness) assertBlueGreenTemplateApplied(s scenario, trigger string) {
+	h.t.Helper()
+	rc := h.cluster(s)
+	active := rc.Status.ActiveClusterName
+	if active == "" {
+		active = s.Name
+	}
+	statefulSet := &appsv1.StatefulSet{}
+	if err := h.client.Get(h.ctx, client.ObjectKey{Namespace: s.Namespace, Name: active}, statefulSet); err != nil {
+		h.t.Fatalf("get active StatefulSet %s/%s: %v", s.Namespace, active, err)
+	}
+	h.assertRedisTemplate(statefulSet.Name, statefulSet.Spec.Template.Spec.Containers, trigger)
+
+	pods := h.pods(s)
+	serving := 0
+	for _, pod := range pods {
+		if !podReady(pod) {
+			continue
+		}
+		serving++
+		h.assertRedisTemplate(pod.Name, pod.Spec.Containers, trigger)
+	}
+	if serving == 0 {
+		h.t.Fatal("active Redis workload has no serving pods")
+	}
+}
+
+func (h *harness) assertRedisTemplate(resourceName string, containers []corev1.Container, trigger string) {
+	h.t.Helper()
+	for _, container := range containers {
+		if container.Name != "redis" {
+			continue
+		}
+		if container.Image != h.redisImage {
+			h.t.Fatalf("%s Redis image=%q, want %q", resourceName, container.Image, h.redisImage)
+		}
+		for _, env := range container.Env {
+			if env.Name == "CLEANROOM_BLUE_GREEN_TRIGGER" && env.Value == trigger {
+				return
+			}
+		}
+		h.t.Fatalf("%s Redis container does not have CLEANROOM_BLUE_GREEN_TRIGGER=%q", resourceName, trigger)
+	}
+	h.t.Fatalf("%s does not have a Redis container", resourceName)
 }
 
 func TestCleanroom_AutoscalingProviderUnavailable(t *testing.T) {
