@@ -5,13 +5,18 @@
 # Wait until a RedisCluster serves traffic: no rollout in progress, every pod
 # Ready, all slots assigned, the topology matches spec.primaries/spec.replicas,
 # and a write is read back through cluster redirects. Exits 1 on timeout.
+# --read-only skips the write. With Redis ACL auth, redis-cli runs in the
+# toolbox through its mounted credential helper.
 #
-#   scripts/verify-cluster.sh --namespace NS --name NAME [--timeout SECONDS] [--json]
+#   scripts/verify-cluster.sh --namespace NS --name NAME [--timeout SECONDS] [--read-only] [--json]
 
 set -uo pipefail
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REDIS_CONTAINER="redis"
+readonly REDIS_PORT=6379
+readonly TOOLBOX_SELECTOR="app.kubernetes.io/component=toolbox"
+readonly AUTH_HELPER="/usr/local/bin/redis-operator-redis-cli"
 readonly HASH_SLOTS=16384
 readonly POLL_SECONDS=5
 readonly DEFAULT_TIMEOUT_SECONDS=600
@@ -19,7 +24,7 @@ readonly PROBE_TTL_SECONDS=60
 readonly PHASE_FAILED="Failed"
 
 usage() {
-  echo "usage: $0 --namespace NAMESPACE --name NAME [--timeout SECONDS] [--json]" >&2
+  echo "usage: $0 --namespace NAMESPACE --name NAME [--timeout SECONDS] [--read-only] [--json]" >&2
   exit 2
 }
 
@@ -27,11 +32,16 @@ namespace=""
 name=""
 timeout="$DEFAULT_TIMEOUT_SECONDS"
 json=false
+read_only=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --namespace | -n) namespace="${2:-}"; shift 2 ;;
-    --name) name="${2:-}"; shift 2 ;;
-    --timeout) timeout="${2:-}"; shift 2 ;;
+    --namespace | -n | --name | --timeout) [[ $# -ge 2 ]] || usage ;;
+  esac
+  case "$1" in
+    --namespace | -n) namespace="$2"; shift 2 ;;
+    --name) name="$2"; shift 2 ;;
+    --timeout) timeout="$2"; shift 2 ;;
+    --read-only) read_only=true; shift ;;
     --json) json=true; shift ;;
     *) usage ;;
   esac
@@ -83,9 +93,26 @@ topology_matches() {
   '
 }
 
+# With ACL auth the Secret is mounted only in the toolbox, so run the helper
+# there against the selected pod; otherwise exec redis-cli in the pod itself.
+auth_toolbox=""
+find_auth_toolbox() {
+  local pod
+  pod="$(kubectl get pods --namespace "$namespace" --selector "$TOOLBOX_SELECTOR" \
+    --field-selector status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  if [[ -n "$pod" ]] && kubectl exec --namespace "$namespace" "$pod" -- test -x "$AUTH_HELPER" >/dev/null 2>&1; then
+    auth_toolbox="$pod"
+  fi
+}
+
 redis_cli() {
-  kubectl exec --namespace "$namespace" "$redis_pod" --container "$REDIS_CONTAINER" -- \
-    redis-cli --raw "$@" 2>/dev/null | tr -d '\r'
+  if [[ -n "$auth_toolbox" ]]; then
+    kubectl exec --namespace "$namespace" "$auth_toolbox" -- \
+      "$AUTH_HELPER" -h "$redis_ip" -p "$REDIS_PORT" --raw "$@" 2>/dev/null | tr -d '\r'
+  else
+    kubectl exec --namespace "$namespace" "$redis_pod" --container "$REDIS_CONTAINER" -- \
+      redis-cli --raw "$@" 2>/dev/null | tr -d '\r'
+  fi
 }
 
 attempt() {
@@ -123,6 +150,7 @@ attempt() {
   fi
   record pods pass "$ready_count/$expected_pods pods Ready"
   redis_pod="$(head -1 <<<"$ready")"
+  redis_ip="$(kubectl get pod "$redis_pod" --namespace "$namespace" -o jsonpath='{.status.podIP}' 2>/dev/null)"
 
   local info state slots known size
   info="$(redis_cli CLUSTER INFO)"
@@ -144,6 +172,8 @@ attempt() {
   fi
   record topology pass "$primaries primaries, $replicas replicas each, all links connected"
 
+  [[ "$read_only" == true ]] && return
+
   local key="rco:verify:$(date +%s)" value="ok-$$"
   if [[ "$(redis_cli -c SET "$key" "$value" EX "$PROBE_TTL_SECONDS")" != OK \
     || "$(redis_cli -c GET "$key")" != "$value" ]]; then
@@ -154,6 +184,7 @@ attempt() {
   record data pass "wrote and read $key (expires in ${PROBE_TTL_SECONDS}s)"
 }
 
+find_auth_toolbox
 deadline=$((SECONDS + timeout))
 while :; do
   attempt

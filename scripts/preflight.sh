@@ -20,7 +20,9 @@ namespace=""
 json=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --namespace | -n) namespace="${2:-}"; shift 2 ;;
+    --namespace | -n)
+      [[ $# -ge 2 ]] || { echo "usage: $0 --namespace NAMESPACE [--json]" >&2; exit 2; }
+      namespace="$2"; shift 2 ;;
     --json) json=true; shift ;;
     *) echo "usage: $0 --namespace NAMESPACE [--json]" >&2; exit 2 ;;
   esac
@@ -90,8 +92,12 @@ else
     "set storageClassName in the RedisCluster volumeClaimTemplates"
 fi
 
-if kubectl get namespace "$namespace" >/dev/null 2>&1; then
+# Only NotFound means absent; a namespace-scoped installer may lack get namespaces.
+if ns_err="$(kubectl get namespace "$namespace" 2>&1 >/dev/null)"; then
   report_add namespace pass "namespace '$namespace' exists"
+elif [[ "$ns_err" != *NotFound* ]]; then
+  report_add namespace warn "cannot read namespace '$namespace', so cannot tell whether it exists" \
+    "confirm it exists; the permissions check below still applies"
 elif can_i create namespaces; then
   report_add namespace todo "namespace '$namespace' does not exist" "helm install ... --create-namespace"
 else

@@ -17,10 +17,10 @@ kubectl get redisclusters --all-namespaces \
 ## 2. Check each one
 
 ```sh
-scripts/verify-cluster.sh --namespace NS --name NAME --timeout 0 --json
+scripts/verify-cluster.sh --namespace NS --name NAME --timeout 0 --read-only --json
 ```
 
-`--timeout 0` checks once instead of waiting.
+`--timeout 0` checks once instead of waiting. `--read-only` skips the SET/GET probe.
 
 ## 3. On a failing check
 
