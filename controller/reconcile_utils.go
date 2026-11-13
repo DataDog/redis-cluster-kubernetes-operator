@@ -422,7 +422,7 @@ func (r *RedisClusterReconciler) downShard(ctx context.Context, cluster *redis_c
 
 	spec := cluster.RedisCluster.Spec
 
-	totalPodCount := len(cluster.Nodes)
+	totalPodCount := len(cluster.AllNodes)
 	targetPodCount := int(cluster.RedisCluster.EffectivePodCount())
 	targetPrimaryCount := int(cluster.RedisCluster.EffectivePrimaries())
 	targetReplicaCount := int(spec.Replicas)
@@ -657,6 +657,16 @@ func (r *RedisClusterReconciler) refreshCluster(ctx context.Context, cluster *re
 	}
 	restorePrunedStatefulSetMetadata(redisCluster)
 
+	// Abort if the chart was redeployed since this cluster snapshot was taken:
+	// the in-flight maintenance plan was computed against the previous spec.
+	// Only the RedisCluster label is compared; the StatefulSet label is synced
+	// by the operator itself and may legitimately change mid-reconcile.
+	if previous, current := cluster.RedisCluster.Labels["chart_version"], redisCluster.Labels["chart_version"]; previous != current {
+		err = fmt.Errorf("chart version changed from %q to %q", previous, current)
+		r.Log.Error(err, "Failed to refresh cluster")
+		return nil, utils.WrapErr(err, "failed to refresh cluster")
+	}
+
 	// ensure the StatefulSet is still ready
 	statefulSetIsReady := redisCluster.Status.StatefulSetReady
 	if !statefulSetIsReady {
@@ -681,15 +691,9 @@ func (r *RedisClusterReconciler) refreshCluster(ctx context.Context, cluster *re
 		return nil, utils.WrapErr(err, "failed to refresh cluster")
 	}
 
-	// Verify that chart versions have not changed
-	clusterChartVersion, statefulSetChartVersion, err := getChartVersions(redisCluster, statefulSet, r.Log)
-	if err != nil {
+	// Ensure the chart_version labels are still readable
+	if _, _, err = getChartVersions(redisCluster, statefulSet, r.Log); err != nil {
 		err = utils.WrapErr(err, "failed to get the chart versions")
-		r.Log.Error(err, "Failed to refresh cluster")
-		return nil, utils.WrapErr(err, "failed to refresh cluster")
-	}
-	if clusterChartVersion != redisCluster.Labels["chart_version"] || statefulSetChartVersion != statefulSet.Labels["chart_version"] {
-		err = fmt.Errorf("chart versions have changed")
 		r.Log.Error(err, "Failed to refresh cluster")
 		return nil, utils.WrapErr(err, "failed to refresh cluster")
 	}
