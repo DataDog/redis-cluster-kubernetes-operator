@@ -8,6 +8,7 @@ go.mod
 go.sum
 OPEN_SOURCE_REMOVAL_INVENTORY.md
 cleanroom-artifacts/
+deploy/
 
 apiv1/
 bluegreen/

@@ -1,0 +1,158 @@
+{{- if and .Values.tls.enabled (not .Values.tls.secretName) }}
+{{- fail "tls.secretName is required when tls.enabled is true" }}
+{{- end }}
+{{- $name := include "redis-cluster.fullname" . }}
+apiVersion: cache.datadoghq.com/v1
+kind: RedisCluster
+metadata:
+  name: {{ $name }}
+  labels:
+    # The controller mirrors this compatibility label onto the StatefulSet.
+    chart_version: {{ .Chart.Version | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+spec:
+  primaries: {{ .Values.primaries }}
+  replicas: {{ .Values.replicas }}
+  restoreFrom: ""
+  backupEnabled: false
+  backupFrequency: 0
+  statefulsetTemplate:
+    spec:
+      serviceName: {{ $name }}
+      replicas: {{ mul .Values.primaries (add1 .Values.replicas) }}
+      # The operator coordinates Redis role changes and Pod replacement.
+      updateStrategy:
+        type: OnDelete
+      selector:
+        matchLabels:
+          {{- include "redis-cluster.selectorLabels" . | nindent 10 }}
+      template:
+        spec:
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- range . }}
+            - name: {{ . }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            fsGroup: 999
+            seccompProfile:
+              type: RuntimeDefault
+          {{- if .Values.tls.enabled }}
+          volumes:
+            - name: tls
+              secret:
+                secretName: {{ .Values.tls.secretName }}
+          {{- end }}
+          containers:
+            - name: redis
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["redis-server"]
+              args:
+                - --cluster-enabled
+                - "yes"
+                - --cluster-config-file
+                - /data/nodes.conf
+                - --cluster-node-timeout
+                - {{ .Values.nodeTimeoutMs | quote }}
+                - --cluster-announce-hostname
+                - $(POD_NAME).$(REDIS_SERVICE_NAME).$(POD_NAMESPACE).svc
+                - --dir
+                - /data
+                - --appendonly
+                - {{ ternary "yes" "no" .Values.appendonly | quote }}
+                - --port
+                - "6379"
+                - --bind
+                - 0.0.0.0
+                - --protected-mode
+                - "no"
+                {{- if .Values.tls.enabled }}
+                - --tls-port
+                - {{ .Values.tls.port | quote }}
+                - --tls-cert-file
+                - /tls/tls.crt
+                - --tls-key-file
+                - /tls/tls.key
+                - --tls-ca-cert-file
+                - /tls/ca.crt
+                - --tls-cluster
+                - "no"
+                - --tls-replication
+                - "no"
+                - --tls-auth-clients
+                - {{ .Values.tls.authClients | quote }}
+                {{- end }}
+                {{- range .Values.extraArgs }}
+                - {{ . | quote }}
+                {{- end }}
+              env:
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: REDIS_SERVICE_NAME
+                  value: {{ $name }}
+              ports:
+                - name: redis
+                  containerPort: 6379
+                - name: gossip
+                  containerPort: 16379
+                {{- if .Values.tls.enabled }}
+                - name: redis-tls
+                  containerPort: {{ .Values.tls.port }}
+                {{- end }}
+              readinessProbe:
+                exec:
+                  command: ["redis-cli", "-h", "127.0.0.1", "ping"]
+                initialDelaySeconds: 3
+                periodSeconds: 5
+              livenessProbe:
+                exec:
+                  command: ["redis-cli", "-h", "127.0.0.1", "ping"]
+                initialDelaySeconds: 15
+                periodSeconds: 10
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                runAsNonRoot: true
+                runAsUser: 999
+                runAsGroup: 999
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                {{- if .Values.tls.enabled }}
+                - name: tls
+                  mountPath: /tls
+                  readOnly: true
+                {{- end }}
+      volumeClaimTemplates:
+        - spec:
+            accessModes: ["ReadWriteOnce"]
+            {{- with .Values.storage.storageClassName }}
+            storageClassName: {{ . }}
+            {{- end }}
+            resources:
+              requests:
+                storage: {{ .Values.storage.size }}

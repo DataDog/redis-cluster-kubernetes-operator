@@ -132,7 +132,8 @@ helm upgrade --install "$RELEASE" "$REPO_ROOT" \
   --wait \
   --timeout 10m
 
-kubectl apply -f "$REPO_ROOT/examples/redis-cluster.yaml"
+helm upgrade --install "$REDIS_CLUSTER_NAME" "$REPO_ROOT/deploy/redis-cluster" \
+  --namespace "$NAMESPACE"
 
 pod_deadline=$((SECONDS + 600))
 while ((SECONDS < pod_deadline)); do
