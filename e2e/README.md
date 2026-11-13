@@ -41,6 +41,7 @@ six Redis pods. Tests run serially and clean up their namespace.
 | Slow | 6 | `E2E_SLOW=1` | backup/restore, scale and reshard, maintenance rebalance, stale-green recovery, DNS drain pacing |
 | Blue-green stuck | 3 | `E2E_SLOW=1` | blank replica, blank primary, loss of both shard copies |
 | Loadgen | 5 | `E2E_LOADGEN=1`; some also need `E2E_SLOW=1` | primary loss, manager restart during scale, force cutover, blue-green rollout and restart |
+| Measure | 4 | `E2E_MEASURE=1` and `E2E_LOADGEN=1`; not scheduled | failover cost alone and during slot migration, as JSON reports ([`docs/failure-modes.md`](../docs/failure-modes.md)) |
 
 The fast tests in `lane_manifest_test.go` do not start KIND. They verify that
 every scenario belongs to exactly one compatible lane, that the CI manifest
@@ -116,7 +117,7 @@ Every new scenario follows the same contract:
 3. Prove the baseline, introduce one change or fault, wait with bounded helpers,
    then assert externally visible data and topology.
 4. Add the exact test name once to the matching lane in `lane_manifest_test.go`.
-5. Call `requireSlow` or `requireLoadgen` when required by the lane.
+5. Call `requireSlow`, `requireLoadgen` or `requireMeasure` when required by the lane.
 6. Run the manifest guard, the focused scenario, and the on-demand CI pipeline.
 
 Generic Kubernetes helpers belong in `test/framework/internal/kindharness`.

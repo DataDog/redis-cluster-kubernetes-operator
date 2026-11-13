@@ -218,6 +218,7 @@ portability.
 - [Local quick start](docs/getting-started.md)
 - [Redis workload contract](docs/workload-contract.md)
 - [Operations guide](docs/operations.md)
+- [Failure modes](docs/failure-modes.md)
 - [RedisCluster API reference](docs/api-reference.md)
 - [Example workload](examples/README.md)
 - [Deployed-operator clean-room tests](test/blackbox/README.md)
@@ -275,6 +276,6 @@ authenticate without a second environment approval. The role needs the scoped
 EKS, CloudFormation, EC2/VPC, IAM pass-role and Pod Identity, ECR, EBS CSI,
 STS, and resource-tagging permissions used by the runner and cleanup audit.
 
-Qualification reports configured workload and operation totals only. It makes no achieved-QPS, latency, or maximum-outage claim.
+Qualification reports configured workload and operation totals only. Client-observed failover latency, errors and data safety are measured separately; see [`docs/failure-modes.md`](docs/failure-modes.md).
 
 See `CONTRIBUTING.md` and `SECURITY.md` before proposing changes. The project is licensed under Apache-2.0; third-party Go module dependencies used by repository packages are listed in `LICENSE-3rdparty.csv`.
