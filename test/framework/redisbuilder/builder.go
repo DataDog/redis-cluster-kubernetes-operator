@@ -26,6 +26,15 @@ const (
 	GossipPort = 16379
 )
 
+// TLSPort / TLSMountPath are the client-TLS listener and certificate mount used
+// by AppendClientTLS. TLSCAKey is the cert-manager CA key in the Secret.
+const (
+	TLSPort       = 6380
+	TLSMountPath  = "/tls"
+	TLSVolumeName = "tls"
+	TLSCAKey      = "ca.crt"
+)
+
 // DefaultPrimaries / DefaultReplicas mirror production: 3 primaries, 1 replica
 // each (6 pods).
 const (
@@ -179,4 +188,34 @@ func SetRestoreFrom(rc *cachev1.RedisCluster, path string) { rc.Spec.RestoreFrom
 // WithRestoreFrom sets the backup path to restore.
 func WithRestoreFrom(path string) ClusterOpt {
 	return func(rc *cachev1.RedisCluster) { SetRestoreFrom(rc, path) }
+}
+
+// AppendClientTLS serves Redis clients over TLS on TLSPort from a Secret with
+// tls.crt, tls.key and ca.crt. The plaintext port, cluster bus and replication
+// stay plaintext, so the operator's own path is unchanged.
+func AppendClientTLS(rc *cachev1.RedisCluster, secretName string) {
+	podSpec := &rc.Spec.StatefulsetTemplate.Spec.Template.Spec
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+		Name:         TLSVolumeName,
+		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: secretName}},
+	})
+	container := &podSpec.Containers[0]
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		Name: TLSVolumeName, MountPath: TLSMountPath, ReadOnly: true,
+	})
+	container.Ports = append(container.Ports, corev1.ContainerPort{ContainerPort: TLSPort, Name: "redis-tls"})
+	container.Args = append(container.Args,
+		"--tls-port", fmt.Sprintf("%d", TLSPort),
+		"--tls-cert-file", TLSMountPath+"/"+corev1.TLSCertKey,
+		"--tls-key-file", TLSMountPath+"/"+corev1.TLSPrivateKeyKey,
+		"--tls-ca-cert-file", TLSMountPath+"/"+TLSCAKey,
+		"--tls-cluster", "no",
+		"--tls-replication", "no",
+		"--tls-auth-clients", "optional",
+	)
+}
+
+// WithClientTLS enables client TLS from secretName.
+func WithClientTLS(secretName string) ClusterOpt {
+	return func(rc *cachev1.RedisCluster) { AppendClientTLS(rc, secretName) }
 }
