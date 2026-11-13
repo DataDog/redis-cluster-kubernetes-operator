@@ -14,6 +14,12 @@ metadata:
     app.kubernetes.io/component: operator
 spec:
   replicas: {{ .Values.operator.replicaCount }}
+  {{- if not .Values.operator.leaderElection.enabled }}
+  # Without leader election nothing prevents the surge pod of a rolling update
+  # from reconciling alongside the old pod, so replace the pod instead.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "redis-cluster-kubernetes-operator.selectorLabels" . | nindent 6 }}
