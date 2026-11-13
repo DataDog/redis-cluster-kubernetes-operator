@@ -416,8 +416,9 @@ func TestReplaceLatestFirstBackupClearsPartialCopy(t *testing.T) {
 // that prefix writes one object and then fails, like an interrupted
 // `aws s3 cp --recursive`.
 type objectStore struct {
-	objects    map[string][]byte
-	failCopyTo string
+	objects      map[string][]byte
+	failCopyTo   string
+	downloadErrs map[string]error
 }
 
 func (s *objectStore) UploadFile(context.Context, string, string) error   { return nil }
@@ -427,6 +428,9 @@ func (s *objectStore) UploadBytes(_ context.Context, data []byte, key string) er
 	return nil
 }
 func (s *objectStore) DownloadBytes(_ context.Context, key string) ([]byte, error) {
+	if err := s.downloadErrs[key]; err != nil {
+		return nil, err
+	}
 	data, ok := s.objects[key]
 	if !ok {
 		return nil, &BackendError{Kind: BackendNotFound, Operation: "download"}
@@ -531,4 +535,71 @@ func TestPromoteReplacesInvalidLatestWithoutTouchingPrevious(t *testing.T) {
 	exists, err := store.Exists(ctx, inProgress)
 	require.NoError(t, err)
 	assert.False(t, exists)
+}
+
+// A latest whose manifest cannot be parsed is invalid in the same way as one
+// with no manifest, and is replaced without touching previous.
+func TestPromoteReplacesLatestWithMalformedManifest(t *testing.T) {
+	store := &objectStore{objects: map[string][]byte{}}
+	r, cluster, backend := newObjectStoreReconciler(t, store)
+	ctx := context.Background()
+	inProgress, latest, previous := r.inProgressBackupPath(cluster), r.latestBackupPath(cluster), r.previousBackupPath(cluster)
+
+	store.objects[previous+"/0/dump.rdb"] = []byte("rdb-good-previous")
+	store.objects[latest+"/0/dump.rdb"] = []byte("rdb-corrupt")
+	store.objects[latest+"/manifest.json"] = []byte("not json")
+	store.objects[inProgress+"/0/dump.rdb"] = []byte("rdb-new")
+	store.objects[inProgress+"/manifest.json"] = []byte("{}")
+
+	require.NoError(t, r.promoteInProgressBackup(ctx, cluster, backend, inProgress, latest, previous))
+	assert.Equal(t, []byte("rdb-new"), store.objects[latest+"/0/dump.rdb"])
+	assert.Equal(t, []byte("rdb-good-previous"), store.objects[previous+"/0/dump.rdb"])
+}
+
+// A transport error while reading latest's manifest says nothing about
+// whether latest is valid. Promotion must refuse and leave latest, previous
+// and the staged backup exactly as they were.
+func TestPromoteRefusesWhenLatestCannotBeInspected(t *testing.T) {
+	store := &objectStore{objects: map[string][]byte{}}
+	r, cluster, backend := newObjectStoreReconciler(t, store)
+	ctx := context.Background()
+	inProgress, latest, previous := r.inProgressBackupPath(cluster), r.latestBackupPath(cluster), r.previousBackupPath(cluster)
+
+	store.objects[previous+"/0/dump.rdb"] = []byte("rdb-previous")
+	store.objects[latest+"/0/dump.rdb"] = []byte("rdb-latest")
+	store.objects[latest+"/manifest.json"] = []byte("{}")
+	store.objects[inProgress+"/0/dump.rdb"] = []byte("rdb-new")
+	store.objects[inProgress+"/manifest.json"] = []byte("{}")
+	store.downloadErrs = map[string]error{
+		latest + "/manifest.json": &BackendError{Kind: BackendNetwork, Operation: "download"},
+	}
+
+	err := r.promoteInProgressBackup(ctx, cluster, backend, inProgress, latest, previous)
+	require.ErrorContains(t, err, "refusing to replace previous with invalid latest backup")
+	assert.Equal(t, []byte("rdb-latest"), store.objects[latest+"/0/dump.rdb"], "latest must not be deleted")
+	assert.Equal(t, []byte("rdb-previous"), store.objects[previous+"/0/dump.rdb"], "previous must not be overwritten")
+	assert.Equal(t, []byte("rdb-new"), store.objects[inProgress+"/0/dump.rdb"], "staged backup must be retained")
+}
+
+func TestIsBackupGenerationInvalid(t *testing.T) {
+	notFound := &BackendError{Kind: BackendNotFound, Operation: "download"}
+	network := &BackendError{Kind: BackendNetwork, Operation: "download"}
+	badManifest := &invalidBackupManifestError{err: errors.New("failed to parse manifest: EOF")}
+
+	cases := map[string]struct {
+		err     error
+		invalid bool
+	}{
+		"manifest not found":    {fmt.Errorf("failed to download manifest: %w", notFound), true},
+		"artifact not found":    {fmt.Errorf("backup generation validation failed: %w", fmt.Errorf("failed to stage artifact: %w", notFound)), true},
+		"malformed manifest":    {badManifest, true},
+		"network error":         {fmt.Errorf("failed to download manifest: %w", network), false},
+		"toolbox or exec error": {errors.New("failed to inspect artifact"), false},
+		"context deadline":      {context.DeadlineExceeded, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.invalid, isBackupGenerationInvalid(tc.err))
+		})
+	}
 }

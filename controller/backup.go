@@ -402,9 +402,15 @@ func (r *RedisClusterReconciler) promoteInProgressBackup(ctx context.Context, cl
 	latestValid := latestExists
 	if latestExists {
 		if err := r.validateBackupGeneration(ctx, cluster, backend, latestPath); err != nil {
-			// Never rotate an invalid latest over previous. Keep previous as is and
-			// let the complete staged backup replace the invalid latest; refusing
-			// here would block every future promotion with no way to recover.
+			// A transient failure to inspect latest says nothing about its
+			// validity: refuse, so a good latest is neither skipped nor deleted.
+			if !isBackupGenerationInvalid(err) {
+				return fmt.Errorf("refusing to replace previous with invalid latest backup: %w", err)
+			}
+			// Latest is missing objects or has a bad manifest. Never rotate it
+			// over previous; let the complete staged backup replace it, since
+			// refusing here would block every future promotion with no way to
+			// recover.
 			r.Log.Error(err, "Latest backup is invalid; replacing it without rotating to previous",
 				"latest", latestPath, "previous", previousPath)
 			latestValid = false
@@ -569,12 +575,28 @@ func (r *RedisClusterReconciler) readBackupManifestContext(ctx context.Context, 
 
 	manifest, err := decodeBackupManifest(manifestBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse manifest: %w", err)
+		return nil, &invalidBackupManifestError{err: fmt.Errorf("failed to parse manifest: %w", err)}
 	}
 	if _, err := validateBackupManifest(manifest, backupPath); err != nil {
-		return nil, fmt.Errorf("invalid backup manifest: %w", err)
+		return nil, &invalidBackupManifestError{err: fmt.Errorf("invalid backup manifest: %w", err)}
 	}
 	return manifest, nil
+}
+
+// invalidBackupManifestError marks a manifest that was downloaded but cannot
+// describe a usable backup generation.
+type invalidBackupManifestError struct{ err error }
+
+func (e *invalidBackupManifestError) Error() string { return e.err.Error() }
+func (e *invalidBackupManifestError) Unwrap() error { return e.err }
+
+// isBackupGenerationInvalid reports whether a validation error proves the
+// generation is missing or unusable: an object is not found, or the manifest
+// is malformed. Transport and execution errors only mean the generation could
+// not be inspected, so they return false.
+func isBackupGenerationInvalid(err error) bool {
+	var manifestErr *invalidBackupManifestError
+	return IsBackendNotFound(err) || errors.As(err, &manifestErr)
 }
 
 func (r *RedisClusterReconciler) validateBackupGeneration(ctx context.Context, cluster *redis_cluster.Cluster, backend BackupProvider, backupPath string) error {
