@@ -641,8 +641,11 @@ func (r *RedisClusterReconciler) reconcileRestoredSlotOwnership(ctx context.Cont
 	if err != nil {
 		return false, utils.WrapErr(err, "failed to inspect restored slot ownership")
 	}
-	expectedPrimaries := int(cluster.RedisCluster.Spec.Primaries)
-	expectedReplicas := int(cluster.RedisCluster.Spec.Primaries * cluster.RedisCluster.Spec.Replicas)
+	// Compare against the retained topology, not spec.primaries: autoscaling or
+	// a retained larger target can make the running cluster (and therefore the
+	// backup manifest) wider than the spec.
+	expectedPrimaries := int(cluster.RedisCluster.EffectivePrimaries())
+	expectedReplicas := expectedPrimaries * int(cluster.RedisCluster.Spec.Replicas)
 	topologyNeedsRepair := len(unassigned) > 0 ||
 		(len(cluster.Nodes[redis_cluster.PrimaryNode]) > expectedPrimaries &&
 			len(cluster.Nodes[redis_cluster.ReplicaNode]) < expectedReplicas)
