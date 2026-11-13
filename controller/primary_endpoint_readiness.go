@@ -20,6 +20,7 @@ import (
 
 const (
 	redisServiceNameEnv                 = "REDIS_SERVICE_NAME"
+	redisAnnounceHostnameOption         = "cluster-announce-hostname"
 	kubernetesServiceDNSSuffix          = "svc"
 	primaryEndpointProbeTimeout         = 3 * time.Second
 	primaryEndpointSuccessInterval      = 2 * time.Second
@@ -64,7 +65,8 @@ type PrimaryEndpointResolver interface {
 	) (string, bool)
 }
 
-// KubernetesServiceDNSResolver derives <pod>.<service>.<namespace>.svc.
+// KubernetesServiceDNSResolver derives <pod>.<service>.<namespace>.svc. Workloads
+// that announce no hostname are IP-only, so their members use the IP endpoint.
 type KubernetesServiceDNSResolver struct{}
 
 func (KubernetesServiceDNSResolver) ResolveHostname(
@@ -72,7 +74,28 @@ func (KubernetesServiceDNSResolver) ResolveHostname(
 	node *redis_cluster.ClusterNode,
 	pod *corev1.Pod,
 ) (string, bool) {
+	if node.Hostname == "" && !podAnnouncesHostname(pod) {
+		return "", false
+	}
 	return expectedRedisPodHostname(cluster, node, pod)
+}
+
+// podAnnouncesHostname reports whether the Redis container configures
+// cluster-announce-hostname on its command line.
+func podAnnouncesHostname(pod *corev1.Pod) bool {
+	for _, container := range pod.Spec.Containers {
+		if container.Name != constants.RedisContainerName {
+			continue
+		}
+		for _, args := range [][]string{container.Command, container.Args} {
+			for _, arg := range args {
+				if strings.Contains(arg, redisAnnounceHostnameOption) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 type lookupIPAddrResolver interface {
