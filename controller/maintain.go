@@ -31,6 +31,15 @@ var (
 
 type cleanFailoverAbortCheck func(context.Context, string) (bool, error)
 
+// postCompletionGraceRemaining is how long maintain still skips after a completed blue/green rollout.
+func postCompletionGraceRemaining(rc *cachev1.RedisCluster, now time.Time) time.Duration {
+	bgDone := rc.Status.BlueGreen.CompletedAt
+	if bgDone <= 0 {
+		return 0
+	}
+	return max(constants.BlueGreenPostCompletionGracePeriod-now.Sub(time.Unix(bgDone, 0)), 0)
+}
+
 func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *redis_cluster.Cluster) (*redis_cluster.Cluster, error) {
 
 	// FIXME: maintainCluster should...
@@ -46,14 +55,11 @@ func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *r
 		return cluster, nil
 	}
 
-	if bgDone := cluster.RedisCluster.Status.BlueGreen.CompletedAt; bgDone > 0 {
-		elapsed := time.Since(time.Unix(bgDone, 0))
-		if elapsed < constants.BlueGreenPostCompletionGracePeriod {
-			log.Info("BG recently completed, skipping aggressive maintain to let topology stabilize",
-				"completedSecondsAgo", int(elapsed.Seconds()),
-				"gracePeriod", constants.BlueGreenPostCompletionGracePeriod.String())
-			return cluster, nil
-		}
+	if wait := postCompletionGraceRemaining(cluster.RedisCluster, time.Now()); wait > 0 {
+		log.Info("BG recently completed, skipping aggressive maintain to let topology stabilize",
+			"graceRemaining", wait.String(),
+			"gracePeriod", constants.BlueGreenPostCompletionGracePeriod.String())
+		return cluster, nil
 	}
 
 	log.Info("Starting cluster maintenance",

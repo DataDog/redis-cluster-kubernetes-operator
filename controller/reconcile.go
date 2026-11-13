@@ -528,16 +528,20 @@ func (r *RedisClusterReconciler) reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: constants.NormalRequeue}, health.OK, nil
 	}
 
+	result := ctrl.Result{}
 	// Schedule next reconcile for backup if enabled
 	if cluster.RedisCluster.Spec.BackupEnabled && cluster.RedisCluster.Spec.BackupFrequency > 0 {
 		nextBackupIn := cluster.RedisCluster.Spec.BackupFrequency - (time.Now().Unix() - cluster.RedisCluster.Status.LastBackupTime)
-		if nextBackupIn < int64(constants.NormalRequeue.Seconds()) {
-			return ctrl.Result{RequeueAfter: constants.NormalRequeue}, health.OK, nil
-		}
-		return ctrl.Result{RequeueAfter: time.Duration(nextBackupIn) * time.Second}, health.OK, nil
+		result.RequeueAfter = max(time.Duration(nextBackupIn)*time.Second, constants.NormalRequeue)
 	}
 
-	return ctrl.Result{}, health.OK, nil
+	// Maintain skipped repair during the post-rollout grace period; come back when it ends.
+	if wait := postCompletionGraceRemaining(cluster.RedisCluster, time.Now()); wait > 0 &&
+		(result.RequeueAfter == 0 || wait < result.RequeueAfter) {
+		result.RequeueAfter = wait
+	}
+
+	return result, health.OK, nil
 }
 
 // AutoscalingWatchProvider optionally attaches provider-owned resource watches
