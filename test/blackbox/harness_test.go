@@ -73,6 +73,7 @@ type harness struct {
 	namespace     string
 	release       string
 	operatorImage string
+	redisImage    string
 	repoRoot      string
 	artifacts     string
 	secrets       [][]byte
@@ -144,6 +145,7 @@ func newHarness(t *testing.T) *harness {
 		namespace:     envOr("CLEANROOM_NAMESPACE", referenceNamespace),
 		release:       envOr("CLEANROOM_RELEASE", "redis-cluster-kubernetes-operator"),
 		operatorImage: requiredEnv(t, "CLEANROOM_OPERATOR_IMAGE"),
+		redisImage:    requiredEnv(t, "CLEANROOM_REDIS_IMAGE"),
 		repoRoot:      requiredEnv(t, "CLEANROOM_REPO_ROOT"),
 		artifacts:     requiredEnv(t, "CLEANROOM_ARTIFACT_DIR"),
 	}

@@ -1,6 +1,6 @@
 # Deployed-operator clean-room qualification
 
-This suite verifies the artifact an outside user installs. It starts with a fresh Kubernetes cluster, builds the operator image from this repository, installs only the root public Helm chart, applies the Redis 8.6 reference workload, and makes assertions through Kubernetes and Redis interfaces. It never starts a controller manager inside the test process.
+This suite verifies the artifact an outside user installs. It starts with a fresh Kubernetes cluster, builds the operator image from this repository, installs only the root public Helm chart, applies the selected Redis-compatible reference workload, and makes assertions through Kubernetes and Redis interfaces. Redis 8.6.0 is the default; Valkey 8.1.11 is selected with `CLEANROOM_REDIS_IMAGE=valkey/valkey:8.1.11`. It never starts a controller manager inside the test process.
 
 The suite requires a dedicated kubeconfig created by the provider runner. Tests refuse ambient Kubernetes configuration. Failure collection requests an explicit allowlist of resource types, never Kubernetes Secrets or a namespace-wide dump, and redacts credential-shaped fields before CI considers an upload.
 
@@ -20,6 +20,9 @@ ci/run-cleanroom.sh kind packaging
 ci/run-cleanroom.sh kind lifecycle
 ci/run-cleanroom.sh kind topology
 ci/run-cleanroom.sh kind security
+
+# Run the same packaged-operator qualification with Valkey.
+CLEANROOM_REDIS_IMAGE=valkey/valkey:8.1.11 ci/run-cleanroom.sh kind full
 ```
 
 The runner creates one control-plane and three worker nodes on Kubernetes 1.33, builds and loads the operator image, installs the chart and reference workload, runs the selected tests with a bounded timeout, collects sanitized evidence after failure, and deletes the cluster through an exit trap. It refuses to reuse a cluster with the generated name.
@@ -38,13 +41,15 @@ The `e2e/` suite is intentionally different: it runs the reconciler in the Go te
 
 ## Continuous integration
 
-Pull requests run Helm schema/lint checks, unit tests, the in-process smoke diagnostic, and `ci/run-cleanroom.sh kind smoke`. The daily schedule and manual **Test** workflow execute every clean-room KIND lane in a fresh cluster while retaining the in-process lanes as separately labeled regressions.
+Pull requests run Helm schema/lint checks, unit tests, in-process smoke with Redis and Valkey, Redis packaged smoke, and every packaged Valkey lane. The daily schedule and manual **Test** workflow execute every in-process and clean-room KIND lane against both qualified engines in fresh clusters.
 
 Failure artifacts are retained for 14 days only after an additional CI credential scan. They include bounded Kubernetes resources, events, pod descriptions and logs, Helm manifests and values, Redis topology observations, and test output. Secret objects and decoded Secret data are excluded. A failed scan suppresses the upload.
 
 ## EKS portability
 
 The **EKS qualification** workflow is manual during Phase 1. It is not a pull-request or scheduled trigger. The qualification job is pinned to the protected `cleanroom-eks` environment; configure its required reviewers before dispatching the workflow.
+
+EKS qualification currently covers Redis 8.6.0 only; Valkey qualification is limited to the KIND suites.
 
 Repository configuration must provide:
 
@@ -60,7 +65,8 @@ EKS 1.33 is in extended support and has an extended-support charge. Confirm the 
 
 ## Qualification boundaries
 
-- Redis 8.6 and Kubernetes 1.33 are the only claimed versions.
+- Redis 8.6.0 and Valkey 8.1.11 on Kubernetes 1.33 are the only claimed versions.
+- Blue-green qualification stays within one engine; cross-engine migration is not covered or supported.
 - Backups retain unit and in-process test coverage, but are not deployed-operator, KIND clean-room, or EKS qualified in this cycle.
 - The tests report configured load, completed operations, failures, and value mismatches. They do not claim achieved QPS, latency, or maximum outage duration.
 - No dd-source checkout, internal chart, private Datadog registry, DatadogMetric, WPA, Fabric hostname, DD.AUTH, or StatsD service is required.

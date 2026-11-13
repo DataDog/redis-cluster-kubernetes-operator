@@ -38,6 +38,10 @@ server and fail during reconciliation.
 ## Redis container
 
 - The Redis container must be named `redis`.
+- The qualified images are `redis:8.6.0` and `valkey/valkey:8.1.11`. The
+  operator keeps its Redis API names for compatibility; the official Valkey
+  image supplies the `redis-server` and `redis-cli` command aliases used by the
+  reference workload and toolbox.
 - Redis Cluster must be enabled.
 - The cluster configuration file must be persistent, for example
   `--cluster-config-file /data/nodes.conf`.
@@ -48,6 +52,8 @@ server and fail during reconciliation.
   when using the reference hostname announcement.
 - Readiness must mean that the Redis process accepts commands. Pod readiness is
   used as a gate before topology changes.
+- Keep blue-green rollouts within one engine. Changing a running Redis cluster
+  to Valkey, or Valkey to Redis, is not a qualified migration path.
 
 ## Headless Service
 

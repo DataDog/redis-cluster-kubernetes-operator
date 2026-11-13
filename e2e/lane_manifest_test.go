@@ -66,6 +66,8 @@ func TestWorkflowUsesPublicLanes(t *testing.T) {
 	for _, fragment := range []string{
 		"pull_request:",
 		"schedule:",
+		"engine: [redis, valkey]",
+		"valkey/valkey:8.1.11",
 		"ci/run-e2e-lane.sh smoke",
 		"lane: [default, slow, bg-stuck, loadgen]",
 		"ci/run-e2e-lane.sh \"${{ matrix.lane }}\"",
