@@ -342,6 +342,44 @@ func TestPrepareEmptyPrimariesForRebalance_InjectedResolverCanSelectIPEndpoint(t
 	require.Zero(t, fixture.prober.calls)
 }
 
+// IP-only workloads (no cluster-announce-hostname) must not wait on Service DNS;
+// otherwise every scale-up stalls before slot assignment.
+func TestPrepareEmptyPrimariesForRebalance_DefaultResolverUsesIPEndpointWithoutAnnouncedHostname(t *testing.T) {
+	ctx := context.Background()
+	fixture := newEmptyPrimaryReadinessFixture(t, []corev1.PodCondition{
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+	})
+	fixture.primary.Hostname = ""
+
+	waitingPods, err := fixture.prepare(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{fixture.pod.Name}, waitingPods)
+	waitingPods, err = fixture.prepare(ctx)
+	require.NoError(t, err)
+	require.Empty(t, waitingPods)
+	require.Zero(t, fixture.prober.calls)
+}
+
+// A pod configured to announce a hostname stays gated until Redis gossips it.
+func TestPrepareEmptyPrimariesForRebalance_ConfiguredAnnounceHostnameWaitsForGossip(t *testing.T) {
+	ctx := context.Background()
+	fixture := newEmptyPrimaryReadinessFixture(t, []corev1.PodCondition{
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+	})
+	fixture.primary.Hostname = ""
+	storedPod := &corev1.Pod{}
+	require.NoError(t, fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.pod), storedPod))
+	storedPod.Spec.Containers[0].Args = []string{"--cluster-announce-hostname", "$(POD_NAME).$(REDIS_SERVICE_NAME).$(POD_NAMESPACE).svc"}
+	require.NoError(t, fixture.reconciler.Update(ctx, storedPod))
+
+	for range 2 {
+		waitingPods, err := fixture.prepare(ctx)
+		require.NoError(t, err)
+		require.Equal(t, []string{fixture.pod.Name}, waitingPods)
+	}
+	require.Zero(t, fixture.prober.calls)
+}
+
 func TestPrepareEmptyPrimariesForRebalance_TypedNilResolverUsesServiceDNS(t *testing.T) {
 	ctx := context.Background()
 	fixture := newEmptyPrimaryReadinessFixture(t, []corev1.PodCondition{

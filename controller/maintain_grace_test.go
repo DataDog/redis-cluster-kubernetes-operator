@@ -104,3 +104,28 @@ func (s *countingMetrics) Gauge(name string, value float64, tags ...string) erro
 	s.gaugeCalls++
 	return nil
 }
+
+// Reconcile requeues on this value, so it must reach zero exactly when maintain resumes.
+func TestPostCompletionGraceRemaining(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	grace := constants.BlueGreenPostCompletionGracePeriod
+	samples := []struct {
+		name        string
+		completedAt int64
+		want        time.Duration
+	}{
+		{"never completed", 0, 0},
+		{"just completed", now.Unix(), grace},
+		{"midway", now.Add(-grace / 2).Unix(), grace / 2},
+		{"at expiry", now.Add(-grace).Unix(), 0},
+		{"long ago", now.Add(-10 * grace).Unix(), 0},
+	}
+	for _, tc := range samples {
+		t.Run(tc.name, func(t *testing.T) {
+			rc := &cachev1.RedisCluster{Status: cachev1.RedisClusterStatus{
+				BlueGreen: cachev1.BlueGreenStatus{CompletedAt: tc.completedAt},
+			}}
+			require.Equal(t, tc.want, postCompletionGraceRemaining(rc, now))
+		})
+	}
+}

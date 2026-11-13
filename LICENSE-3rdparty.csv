@@ -38,7 +38,7 @@ github.com/stretchr/testify,https://pkg.go.dev/github.com/stretchr/testify@v1.11
 github.com/x448/float16,https://pkg.go.dev/github.com/x448/float16@v0.8.4?tab=licenses,MIT,Copyright (c) 2019 Montgomery Edwards⁴⁴⁸ and Faye Amacker
 go.uber.org/multierr,https://pkg.go.dev/go.uber.org/multierr@v1.11.0?tab=licenses,MIT,"Copyright (c) 2017-2021 Uber Technologies, Inc."
 go.uber.org/zap,https://pkg.go.dev/go.uber.org/zap@v1.27.0?tab=licenses,MIT,"Copyright (c) 2016-2017 Uber Technologies, Inc."
-golang.org/x/net,https://pkg.go.dev/golang.org/x/net@v0.61.0?tab=licenses,BSD-3-Clause,Copyright 2009 The Go Authors
+golang.org/x/net,https://pkg.go.dev/golang.org/x/net@v0.62.0?tab=licenses,BSD-3-Clause,Copyright 2009 The Go Authors
 golang.org/x/oauth2,https://pkg.go.dev/golang.org/x/oauth2@v0.27.0?tab=licenses,BSD-3-Clause,Copyright 2009 The Go Authors
 golang.org/x/sync,https://pkg.go.dev/golang.org/x/sync@v0.24.0?tab=licenses,BSD-3-Clause,Copyright 2009 The Go Authors
 golang.org/x/sys,https://pkg.go.dev/golang.org/x/sys@v0.49.0?tab=licenses,BSD-3-Clause,Copyright 2009 The Go Authors
