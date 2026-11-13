@@ -36,6 +36,20 @@ healthy Redis topology. It never uses the current context from the default
 kubeconfig. See [`docs/getting-started.md`](docs/getting-started.md) for data,
 restart, log, qualification, and cleanup commands.
 
+## Set up with an AI agent
+
+Clone this repository and ask a coding agent (Claude Code, Codex, Cursor):
+
+> Install the redis-cluster operator from this repository using
+> `skills/redis-cluster-setup/SKILL.md`. Create a cluster for a 10 GiB cache
+> that must survive a pod loss, and verify it.
+
+The agent confirms the kubeconfig context first, runs
+`scripts/preflight.sh`, sizes the cluster with [docs/sizing.md](docs/sizing.md),
+shows you the values before applying them, and finishes only when
+`scripts/verify-cluster.sh` passes. For a read-only check of existing clusters
+use `skills/redis-cluster-health/SKILL.md`.
+
 ## Install
 
 Prerequisites are Helm 3 and a Kubernetes 1.33 cluster. Until a release image is published, build and load the operator image into your registry or local cluster:
@@ -219,6 +233,8 @@ portability.
 - [Redis workload contract](docs/workload-contract.md)
 - [Operations guide](docs/operations.md)
 - [RedisCluster API reference](docs/api-reference.md)
+- [Sizing](docs/sizing.md)
+- [Agent skills](AGENTS.md)
 - [Example workload](examples/README.md)
 - [Deployed-operator clean-room tests](test/blackbox/README.md)
 - [In-process KIND tests](e2e/README.md)
