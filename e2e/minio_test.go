@@ -35,9 +35,10 @@ const (
 )
 
 // minioImage / awsCliImage default to public pinned images and can be
-// overridden for mirrors or controlled image updates.
+// overridden for mirrors or controlled image updates. docker.io/minio/minio is
+// no longer published, so the default is Chainguard's anonymous MinIO build.
 func minioImage() string {
-	return envOr("E2E_MINIO_IMAGE", "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e")
+	return envOr("E2E_MINIO_IMAGE", "cgr.dev/chainguard/minio@sha256:786cb11d340b1a657de8dc899560e36e1d1fb371d3d6f3eb6c903a0bb0cec714")
 }
 func awsCliImage() string { return envOr("E2E_AWS_CLI_IMAGE", "amazon/aws-cli:2.15.57") }
 

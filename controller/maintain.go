@@ -116,6 +116,12 @@ func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *r
 		if len(cluster.Nodes[redis_cluster.OtherNode]) > 0 {
 			_ = r.Metrics.CountBadSituation("other_nodes_found")
 			repaired := 0
+			// A terminating or draining pod was FORGOTTEN on purpose; probing it can
+			// hang and a MEET would undo the FORGET.
+			podList, podErr := r.GetRedisClusterPods(ctx, cluster.RedisCluster)
+			if podErr != nil {
+				log.Error(podErr, "Failed to list pods for other-node repair, probing every other node")
+			}
 			for _, node := range cluster.Nodes[redis_cluster.OtherNode] {
 				debugInfo := node.GetRoleDebugInfo()
 				log.Info("Found 'other' node (transient state) - role detection debug",
@@ -134,6 +140,11 @@ func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *r
 
 				if node.IP == "" {
 					log.Info("Other node has no IP, skipping probe", "podName", node.PodName)
+					continue
+				}
+				if podList != nil && podIsDrainingOrTerminating(podList, node.IP) {
+					log.Info("Other node pod is draining or terminating, skipping probe",
+						"podName", node.PodName, "ip", node.IP)
 					continue
 				}
 

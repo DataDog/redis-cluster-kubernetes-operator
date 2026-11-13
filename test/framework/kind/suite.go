@@ -45,6 +45,8 @@ const (
 	// specHashTimeout bounds the wait for the operator to stamp its baseline
 	// LastAppliedSpecHash on a fresh cluster before a BG trigger is applied.
 	specHashTimeout = 1 * time.Minute
+	// bgTriggerEnv is the redis container env var TriggerBlueGreen bumps.
+	bgTriggerEnv = "E2E_BG_TRIGGER"
 )
 
 // errBlueGreenFailed aborts a phase wait when the operator reports BG Failed.
@@ -146,12 +148,47 @@ func (s *Suite) TriggerBlueGreen(t *testing.T, name string) {
 	v := "e2e-bg-" + time.Now().Format("150405.000")
 	rc := s.GetCluster(t, name)
 	setChartVersion(rc, v)
-	tpl := &rc.Spec.StatefulsetTemplate.Spec.Template
-	if tpl.Annotations == nil {
-		tpl.Annotations = map[string]string{}
-	}
-	tpl.Annotations["e2e.redis.example.com/bg-trigger"] = v
+	// An env var, not a pod annotation: the compatibility CRD prunes embedded
+	// pod-template metadata, so an annotation never reaches the rollout hash.
+	setContainerEnv(t, &rc.Spec.StatefulsetTemplate.Spec.Template.Spec, constants.RedisContainerName, bgTriggerEnv, v)
 	require.NoError(t, s.Fixture.Client.Update(s.Ctx, rc))
+	require.Equal(t, v, containerEnv(s.GetCluster(t, name).Spec.StatefulsetTemplate.Spec.Template.Spec, constants.RedisContainerName, bgTriggerEnv),
+		"API server dropped the blue-green trigger")
+}
+
+// setContainerEnv sets an env var on the named container, replacing any existing value.
+func setContainerEnv(t *testing.T, pod *corev1.PodSpec, container, name, value string) {
+	t.Helper()
+	for i := range pod.Containers {
+		if pod.Containers[i].Name != container {
+			continue
+		}
+		c := &pod.Containers[i]
+		for j := range c.Env {
+			if c.Env[j].Name == name {
+				c.Env[j] = corev1.EnvVar{Name: name, Value: value}
+				return
+			}
+		}
+		c.Env = append(c.Env, corev1.EnvVar{Name: name, Value: value})
+		return
+	}
+	t.Fatalf("container %q not found", container)
+}
+
+// containerEnv returns the literal value of an env var on the named container.
+func containerEnv(pod corev1.PodSpec, container, name string) string {
+	for _, c := range pod.Containers {
+		if c.Name != container {
+			continue
+		}
+		for _, e := range c.Env {
+			if e.Name == name {
+				return e.Value
+			}
+		}
+	}
+	return ""
 }
 
 // waitSpecHashStamped blocks until the operator has recorded a baseline
