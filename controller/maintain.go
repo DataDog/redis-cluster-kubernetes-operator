@@ -942,6 +942,17 @@ func orderReplicasNonDrainingFirst(replicas []*redis_cluster.ClusterNode) []*red
 	return ordered
 }
 
+// podNodesWithoutID returns the pod names of pod-backed nodes whose Redis node ID is not known yet.
+func podNodesWithoutID(cluster *redis_cluster.Cluster) []string {
+	var pods []string
+	for _, n := range cluster.AllNodes {
+		if n.PodIndex >= 0 && n.ID == "" {
+			pods = append(pods, n.PodName)
+		}
+	}
+	return pods
+}
+
 // forgetZombies instructs primaries and replicas to forget about zombie nodes, if any, and refreshes the cluster.
 func (r *RedisClusterReconciler) forgetZombies(ctx context.Context, cluster *redis_cluster.Cluster, log logr.Logger) (*redis_cluster.Cluster, error) {
 
@@ -957,6 +968,18 @@ func (r *RedisClusterReconciler) forgetZombies(ctx context.Context, cluster *red
 	_ = r.Metrics.Count(counters.ZombieDetected)
 
 	zombieIDs := redis_cluster.GetNodeIDs(cluster.Nodes[redis_cluster.ZombieNode])
+
+	// A running pod whose Redis has not reported its node ID yet (e.g. it was just
+	// recreated and Redis is still starting) may be the owner of a "zombie" ID that
+	// peers still list at the pod's previous IP. FORGETting it would evict a live
+	// node, so defer zombie cleanup until every pod-backed node has an ID.
+	if pending := podNodesWithoutID(cluster); len(pending) > 0 {
+		log.Info("Deferring zombie cleanup: some pods have not reported a Redis node ID yet",
+			"zombieIDs", zombieIDs,
+			"podsWithoutID", pending)
+		_ = r.Metrics.CountBadSituation("zombie_forget_deferred_pod_without_id")
+		return cluster, nil
+	}
 	log.Info("Detected zombie nodes to forget",
 		"zombieCount", zombieCount,
 		"zombieIDs", zombieIDs,
