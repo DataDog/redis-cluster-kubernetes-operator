@@ -26,8 +26,15 @@ case "$LANE" in
     export E2E_BUILD_LOADGEN=1
     export E2E_TEST_TIMEOUT="${E2E_TEST_TIMEOUT:-85m}"
     ;;
+  measure)
+    # Not scheduled in CI: five runs per scenario take hours. Reports go to MEASURE_OUT.
+    export E2E_MEASURE=1
+    export E2E_BUILD_LOADGEN=1
+    export E2E_TEST_TIMEOUT="${E2E_TEST_TIMEOUT:-240m}"
+    export MEASURE_COMMIT="${MEASURE_COMMIT:-$(git -C "$OP_DIR" rev-parse --short HEAD)}"
+    ;;
   *)
-    echo "usage: $0 {smoke|default|slow|bg-stuck|loadgen}" >&2
+    echo "usage: $0 {smoke|default|slow|bg-stuck|loadgen|measure}" >&2
     exit 2
     ;;
 esac
