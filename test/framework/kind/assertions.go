@@ -208,31 +208,38 @@ func (s *Suite) RequireSingleActiveStatefulSet(t *testing.T, name string) {
 }
 
 // CheckSingleActiveStatefulSet checks for one ready StatefulSet with the active name.
+// StatefulSets are matched by controller reference: the compatibility CRD prunes
+// statefulsetTemplate metadata, so they do not carry the cluster-name label.
 func (s *Suite) CheckSingleActiveStatefulSet(name string) error {
+	rc := &cachev1.RedisCluster{}
+	if err := s.Get(name, rc); err != nil {
+		return fmt.Errorf("get RedisCluster: %w", err)
+	}
 	var list appsv1.StatefulSetList
-	if err := s.Client.List(s.Ctx, &list, client.InNamespace(s.Namespace),
-		client.MatchingLabels{constants.LabelRedisClusterName: name}); err != nil {
+	if err := s.Client.List(s.Ctx, &list, client.InNamespace(s.Namespace)); err != nil {
 		return fmt.Errorf("list StatefulSets: %w", err)
 	}
-	if len(list.Items) != 1 {
-		return fmt.Errorf("StatefulSet count: want 1, got %d", len(list.Items))
+	owned := make([]appsv1.StatefulSet, 0, 1)
+	for i := range list.Items {
+		if metav1.IsControlledBy(&list.Items[i], rc) {
+			owned = append(owned, list.Items[i])
+		}
+	}
+	if len(owned) != 1 {
+		return fmt.Errorf("StatefulSet count: want 1, got %d", len(owned))
 	}
 	pods, err := s.tryRedisPodList(name)
 	if err != nil {
 		return fmt.Errorf("list Redis pods: %w", err)
 	}
-	if got, want := list.Items[0].Status.ReadyReplicas, int32(len(pods)); got != want {
+	if got, want := owned[0].Status.ReadyReplicas, int32(len(pods)); got != want {
 		return fmt.Errorf("ready replicas: want %d, got %d", want, got)
-	}
-	rc := &cachev1.RedisCluster{}
-	if err := s.Get(name, rc); err != nil {
-		return fmt.Errorf("get RedisCluster: %w", err)
 	}
 	active := rc.Status.ActiveClusterName
 	if active == "" {
 		active = name
 	}
-	if got := list.Items[0].Name; got != active {
+	if got := owned[0].Name; got != active {
 		return fmt.Errorf("active StatefulSet: want %q, got %q", active, got)
 	}
 	return nil

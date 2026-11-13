@@ -67,6 +67,38 @@ func TestReconcileRestoredSlotOwnershipClearsPendingAfterConvergence(t *testing.
 	assert.False(t, cluster.RedisCluster.Status.RestoreTopologyPending)
 }
 
+func TestReconcileRestoredSlotOwnershipUsesEffectivePrimaries(t *testing.T) {
+	// The retained topology is 4 primaries x 1 replica while spec.primaries is 3
+	// (autoscaled or retained after a spec decrease). After restore, one
+	// duplicate primary still has to be converted into the fourth replica.
+	nodes := []*redis_cluster.ClusterNode{
+		restoredPrimary(0, redis_cluster.SlotsRange{First: 0, Last: 4095}),
+		restoredPrimary(1, redis_cluster.SlotsRange{First: 4096, Last: 8191}),
+		restoredPrimary(2, redis_cluster.SlotsRange{First: 8192, Last: 12287}),
+		restoredPrimary(3, redis_cluster.SlotsRange{First: 12288, Last: 16383}),
+		restoredPrimary(4),
+	}
+	cluster := restoredTopologyTestCluster(nodes...)
+	cluster.Nodes[redis_cluster.ReplicaNode] = []*redis_cluster.ClusterNode{
+		{PodName: "redis-5", PodIndex: 5, Role: redis_cluster.ReplicaNode},
+		{PodName: "redis-6", PodIndex: 6, Role: redis_cluster.ReplicaNode},
+		{PodName: "redis-7", PodIndex: 7, Role: redis_cluster.ReplicaNode},
+	}
+	cluster.RedisCluster = &cachev1.RedisCluster{}
+	cluster.RedisCluster.Spec.Primaries = 3
+	cluster.RedisCluster.Spec.Replicas = 1
+	cluster.RedisCluster.Status.Autoscaling.EffectivePrimaries = 4
+	cluster.RedisCluster.Status.BackupRestored = true
+	cluster.RedisCluster.Status.RestoreTopologyPending = true
+
+	updated, err := (&RedisClusterReconciler{}).reconcileRestoredSlotOwnership(context.Background(), cluster, logr.Discard())
+
+	require.NoError(t, err)
+	assert.False(t, updated)
+	assert.True(t, cluster.RedisCluster.Status.RestoreTopologyPending,
+		"restore reconstruction must stay pending until the retained 4x1 topology converges")
+}
+
 func TestPlanRestoredSlotOwnershipUsesDataBearingPrimaries(t *testing.T) {
 	cluster := restoredTopologyTestCluster(
 		restoredPrimary(0),

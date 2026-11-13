@@ -6,6 +6,7 @@
 package e2e
 
 import (
+	"maps"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -94,6 +95,9 @@ func createStaleGreenStatefulSet(t *testing.T, s *rckind.Suite, name string) typ
 		Spec:       *template.Spec.DeepCopy(),
 	}
 	sts.Spec.Replicas = &replicas
+	// The compatibility CRD prunes pod-template labels; restore the selector
+	// labels as the operator does, or the API server rejects the StatefulSet.
+	sts.Spec.Template.Labels = maps.Clone(sts.Spec.Selector.MatchLabels)
 	require.NoError(t, ctrl.SetControllerReference(rc, sts, s.Client.Scheme()))
 	require.NoError(t, s.Client.Create(s.Ctx, sts))
 	return sts.UID

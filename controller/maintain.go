@@ -31,6 +31,15 @@ var (
 
 type cleanFailoverAbortCheck func(context.Context, string) (bool, error)
 
+// postCompletionGraceRemaining is how long maintain still skips after a completed blue/green rollout.
+func postCompletionGraceRemaining(rc *cachev1.RedisCluster, now time.Time) time.Duration {
+	bgDone := rc.Status.BlueGreen.CompletedAt
+	if bgDone <= 0 {
+		return 0
+	}
+	return max(constants.BlueGreenPostCompletionGracePeriod-now.Sub(time.Unix(bgDone, 0)), 0)
+}
+
 func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *redis_cluster.Cluster) (*redis_cluster.Cluster, error) {
 
 	// FIXME: maintainCluster should...
@@ -46,14 +55,11 @@ func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *r
 		return cluster, nil
 	}
 
-	if bgDone := cluster.RedisCluster.Status.BlueGreen.CompletedAt; bgDone > 0 {
-		elapsed := time.Since(time.Unix(bgDone, 0))
-		if elapsed < constants.BlueGreenPostCompletionGracePeriod {
-			log.Info("BG recently completed, skipping aggressive maintain to let topology stabilize",
-				"completedSecondsAgo", int(elapsed.Seconds()),
-				"gracePeriod", constants.BlueGreenPostCompletionGracePeriod.String())
-			return cluster, nil
-		}
+	if wait := postCompletionGraceRemaining(cluster.RedisCluster, time.Now()); wait > 0 {
+		log.Info("BG recently completed, skipping aggressive maintain to let topology stabilize",
+			"graceRemaining", wait.String(),
+			"gracePeriod", constants.BlueGreenPostCompletionGracePeriod.String())
+		return cluster, nil
 	}
 
 	log.Info("Starting cluster maintenance",
@@ -116,6 +122,12 @@ func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *r
 		if len(cluster.Nodes[redis_cluster.OtherNode]) > 0 {
 			_ = r.Metrics.CountBadSituation("other_nodes_found")
 			repaired := 0
+			// A terminating or draining pod was FORGOTTEN on purpose; probing it can
+			// hang and a MEET would undo the FORGET.
+			podList, podErr := r.GetRedisClusterPods(ctx, cluster.RedisCluster)
+			if podErr != nil {
+				log.Error(podErr, "Failed to list pods for other-node repair, probing every other node")
+			}
 			for _, node := range cluster.Nodes[redis_cluster.OtherNode] {
 				debugInfo := node.GetRoleDebugInfo()
 				log.Info("Found 'other' node (transient state) - role detection debug",
@@ -134,6 +146,11 @@ func (r *RedisClusterReconciler) maintainCluster(ctx context.Context, cluster *r
 
 				if node.IP == "" {
 					log.Info("Other node has no IP, skipping probe", "podName", node.PodName)
+					continue
+				}
+				if podList != nil && podIsDrainingOrTerminating(podList, node.IP) {
+					log.Info("Other node pod is draining or terminating, skipping probe",
+						"podName", node.PodName, "ip", node.IP)
 					continue
 				}
 
@@ -630,8 +647,11 @@ func (r *RedisClusterReconciler) reconcileRestoredSlotOwnership(ctx context.Cont
 	if err != nil {
 		return false, utils.WrapErr(err, "failed to inspect restored slot ownership")
 	}
-	expectedPrimaries := int(cluster.RedisCluster.Spec.Primaries)
-	expectedReplicas := int(cluster.RedisCluster.Spec.Primaries * cluster.RedisCluster.Spec.Replicas)
+	// Compare against the retained topology, not spec.primaries: autoscaling or
+	// a retained larger target can make the running cluster (and therefore the
+	// backup manifest) wider than the spec.
+	expectedPrimaries := int(cluster.RedisCluster.EffectivePrimaries())
+	expectedReplicas := expectedPrimaries * int(cluster.RedisCluster.Spec.Replicas)
 	topologyNeedsRepair := len(unassigned) > 0 ||
 		(len(cluster.Nodes[redis_cluster.PrimaryNode]) > expectedPrimaries &&
 			len(cluster.Nodes[redis_cluster.ReplicaNode]) < expectedReplicas)

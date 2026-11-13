@@ -682,12 +682,15 @@ func (t *Toolbox) DBSize(ip string) (int, error) {
 	return n, nil
 }
 
-// PingIP checks if a Redis node at the given IP is responding.
+// PingIP checks if a Redis node at the given IP is responding. An unreachable
+// node fails after clusterViewPerNodeTimeout instead of stalling the reconcile.
 func (t *Toolbox) PingIP(ip string) bool {
 	if err := t.validate(); err != nil {
 		return false
 	}
-	rc, stdout, _, err := t.runRedis(t.ctx, ip, t.RedisPort, "PING")
+	ctx, cancel := context.WithTimeout(t.ctx, clusterViewPerNodeTimeout)
+	defer cancel()
+	rc, stdout, _, err := t.runRedis(ctx, ip, t.RedisPort, "PING")
 	return err == nil && rc == 0 && strings.Contains(stdout, "PONG")
 }
 
