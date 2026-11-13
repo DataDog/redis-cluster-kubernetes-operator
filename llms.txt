@@ -1,0 +1,24 @@
+# redis-cluster-kubernetes-operator
+
+> Kubernetes operator that creates and manages Redis Cluster (sharded, hash slots) from a RedisCluster custom resource: topology, failover, resharding, blue/green pod rollouts and backups. Namespace-scoped. Beta: Redis 8.6 on Kubernetes 1.33.
+
+Agents setting up or checking a cluster should follow the skills; they use the scripts below and report JSON results.
+
+## Agent skills
+
+- [Set up the operator and a cluster](skills/redis-cluster-setup/SKILL.md): confirm target, preflight, install, size, create, verify
+- [Health check](skills/redis-cluster-health/SKILL.md): read-only report for every RedisCluster
+
+## Scripts
+
+- [scripts/preflight.sh](scripts/preflight.sh): is this Kubernetes cluster ready for the operator (`--json`)
+- [scripts/verify-cluster.sh](scripts/verify-cluster.sh): does a RedisCluster serve traffic (`--json`)
+
+## Docs
+
+- [Sizing](docs/sizing.md): requirements to primaries, replicas, maxmemory, CPU and memory
+- [Local quick start](docs/getting-started.md)
+- [Workload contract](docs/workload-contract.md): what the pod template must contain
+- [Operations](docs/operations.md)
+- [API reference](docs/api-reference.md)
+- [Example workload](examples/redis-cluster.yaml)
