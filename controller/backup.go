@@ -343,6 +343,11 @@ func replaceLatestWithInProgress(ctx context.Context, store BackupStore, inProgr
 	if err := store.CopyPrefix(ctx, inProgressPath, latestPath); err != nil {
 		promotionErr := fmt.Errorf("failed to copy in-progress to latest: %w", err)
 		if !latestWasRotated {
+			// Nothing to roll back to. Remove the partial copy so it is not left
+			// as an invalid latest that blocks every later promotion.
+			if cleanupErr := store.DeletePrefix(ctx, latestPath); cleanupErr != nil && !IsBackendNotFound(cleanupErr) {
+				return fmt.Errorf("%w; failed to clear partial latest: %w", promotionErr, cleanupErr)
+			}
 			return promotionErr
 		}
 
@@ -394,19 +399,28 @@ func (r *RedisClusterReconciler) promoteInProgressBackup(ctx context.Context, cl
 	if err != nil {
 		return fmt.Errorf("failed to determine whether latest backup exists: %w", err)
 	}
+	latestValid := latestExists
 	if latestExists {
 		if err := r.validateBackupGeneration(ctx, cluster, backend, latestPath); err != nil {
-			return fmt.Errorf("refusing to replace previous with invalid latest backup: %w", err)
+			// Never rotate an invalid latest over previous. Keep previous as is and
+			// let the complete staged backup replace the invalid latest; refusing
+			// here would block every future promotion with no way to recover.
+			r.Log.Error(err, "Latest backup is invalid; replacing it without rotating to previous",
+				"latest", latestPath, "previous", previousPath)
+			latestValid = false
 		}
 	}
 
-	// Rotate latest -> previous. A confirmed absence is the only first-backup case.
-	latestWasRotated, err := rotateLatestToPrevious(ctx, store, latestPath, previousPath)
-	if err != nil {
-		return err
-	}
-	if latestWasRotated {
-		r.Log.Info("Rotated latest backup to previous", "from", latestPath, "to", previousPath)
+	// Rotate latest -> previous, only when latest is a valid generation.
+	latestWasRotated := false
+	if latestValid {
+		latestWasRotated, err = rotateLatestToPrevious(ctx, store, latestPath, previousPath)
+		if err != nil {
+			return err
+		}
+		if latestWasRotated {
+			r.Log.Info("Rotated latest backup to previous", "from", latestPath, "to", previousPath)
+		}
 	}
 
 	if err := replaceLatestWithInProgress(ctx, store, inProgressPath, latestPath, previousPath, latestWasRotated); err != nil {
