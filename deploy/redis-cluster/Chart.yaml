@@ -1,0 +1,12 @@
+apiVersion: v2
+name: redis-cluster
+description: A Redis Cluster managed by redis-cluster-kubernetes-operator
+type: application
+version: 0.1.0
+appVersion: "8.6.0"
+kubeVersion: ">=1.33.0-0"
+home: https://github.com/DataDog/redis-cluster-kubernetes-operator
+sources:
+  - https://github.com/DataDog/redis-cluster-kubernetes-operator
+maintainers:
+  - name: Datadog

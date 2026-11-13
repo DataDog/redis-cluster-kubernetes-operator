@@ -73,6 +73,8 @@ jobs:
         run: ci/test-chart-image-settings.sh
       - name: Verify operator rollout strategy
         run: ci/test-chart-operator-strategy.sh
+      - name: Validate the RedisCluster instance chart
+        run: ci/test-instance-chart.sh
 
   pull-request-smoke:
     if: github.event_name == 'pull_request'

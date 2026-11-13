@@ -31,14 +31,43 @@ export KUBECONFIG="$PWD/.local/kubeconfig"
 ```
 
 The command builds the current checkout, installs the chart into a dedicated
-one-node KIND cluster, applies the six-pod `cache` example, and waits for a
+one-node KIND cluster, installs the six-pod `cache` cluster from
+`deploy/redis-cluster`, and waits for a
 healthy Redis topology. It never uses the current context from the default
 kubeconfig. See [`docs/getting-started.md`](docs/getting-started.md) for data,
 restart, log, qualification, and cleanup commands.
 
 ## Install
 
-Prerequisites are Helm 3 and a Kubernetes 1.33 cluster. Until a release image is published, build and load the operator image into your registry or local cluster:
+Prerequisites are Helm 3 and a Kubernetes 1.33 cluster. The operator is
+namespace-scoped: install it into the namespace that will hold the
+`RedisCluster` resources.
+
+### From a release
+
+Tagged releases publish the image, both charts as OCI artifacts and an
+`install.yaml` asset:
+
+```sh
+VERSION=X.Y.Z
+helm install redis-operator oci://ghcr.io/datadog/charts/redis-cluster-kubernetes-operator \
+  --version "$VERSION" --namespace cache --create-namespace
+helm install cache oci://ghcr.io/datadog/charts/redis-cluster \
+  --version "$VERSION" --namespace cache --set primaries=3 --set replicas=1
+```
+
+Without Helm, `kubectl apply --server-side -f install.yaml` installs the CRD
+and the operator into the `redis-cluster-operator` namespace. Apply `crds.yaml`
+from a newer release to upgrade the CRD; Helm does not upgrade CRDs.
+
+The `redis-cluster` chart renders the headless Service and the
+contract-correct StatefulSet template from a few values (`primaries`,
+`replicas`, `resources`, `storage`, `tls`). Its default render equals
+`examples/redis-cluster.yaml`.
+
+### From source
+
+Build and load the operator image into your registry or local cluster:
 
 ```sh
 docker build -t redis-cluster-kubernetes-operator:dev .
@@ -203,7 +232,7 @@ portability.
 ## Beta limitations
 
 - Only Redis 8.6 and Kubernetes 1.33 are claimed as compatible.
-- The repository does not publish an image or chart during Phase 1.
+- Releases before the first tag built by `.github/workflows/release.yml` have no published image or chart.
 - The reference binary enables no autoscaling recommendation provider or provider-specific lifecycle adapter.
 - Primary downscale is not supported in the initial public release. Lowering `spec.primaries` does not lower the retained effective target or remove Redis pods.
 - Blue-green rollout qualification covers image changes. Other pod-template

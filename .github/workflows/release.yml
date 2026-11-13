@@ -1,0 +1,126 @@
+name: Release
+
+# Publishes the public image, both Helm charts (OCI) and release manifests for
+# a vX.Y.Z tag. The `release` environment must require reviewer approval.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/datadog/redis-cluster-kubernetes-operator
+  CHART_REPO: oci://ghcr.io/datadog/charts
+
+jobs:
+  verify:
+    name: Verify tagged source
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Derive version from tag
+        id: version
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || {
+            echo "tag must be vMAJOR.MINOR.PATCH, got $GITHUB_REF_NAME" >&2
+            exit 1
+          }
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - name: Install Kubernetes 1.33 envtest binaries
+        run: |
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20250626154428-7fd020cb5fc3 use 1.33.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
+      - run: make verify-crd-contract verify-license-inventory
+      - run: go test ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+      - run: |
+          helm lint . --strict --kube-version 1.33.0
+          ci/test-chart-image-settings.sh
+          ci/test-instance-chart.sh
+
+  publish:
+    name: Publish image, charts and manifests
+    needs: verify
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push multi-architecture image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+          sbom: true
+          provenance: mode=max
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - name: Package and push charts
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Pin the published operator chart to the image built above.
+          yq -i '.operator.image.tag = strenv(VERSION) | .operator.image.digest = strenv(DIGEST)' values.yaml
+          mkdir -p "$RUNNER_TEMP/charts"
+          helm package . --version "$VERSION" --app-version "$VERSION" --destination "$RUNNER_TEMP/charts"
+          helm package deploy/redis-cluster --version "$VERSION" --destination "$RUNNER_TEMP/charts"
+          helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$REGISTRY_TOKEN"
+          for chart in "$RUNNER_TEMP"/charts/*.tgz; do
+            helm push "$chart" "$CHART_REPO"
+          done
+      - name: Render release manifests
+        run: |
+          cp crds/redis-cluster-v1.yaml "$RUNNER_TEMP/crds.yaml"
+          {
+            cat crds/redis-cluster-v1.yaml
+            echo "---"
+            helm template redis-cluster-operator "$RUNNER_TEMP/charts/redis-cluster-kubernetes-operator-$VERSION.tgz" \
+              --namespace redis-cluster-operator --set namespace.create=true --kube-version 1.33.0
+          } > "$RUNNER_TEMP/install.yaml"
+      - name: Attach manifests to the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/install.yaml" "$RUNNER_TEMP/crds.yaml" --clobber
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### Release $VERSION"
+            echo "- Image: \`$IMAGE:$VERSION\` (\`$DIGEST\`)"
+            echo "- Charts: \`$CHART_REPO/redis-cluster-kubernetes-operator\`, \`$CHART_REPO/redis-cluster\` ($VERSION)"
+            echo "- Release assets: \`install.yaml\`, \`crds.yaml\`"
+          } >> "$GITHUB_STEP_SUMMARY"

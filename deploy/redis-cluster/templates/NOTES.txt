@@ -1,0 +1,10 @@
+RedisCluster {{ include "redis-cluster.fullname" . }}: {{ .Values.primaries }} primaries x {{ .Values.replicas }} replicas ({{ mul .Values.primaries (add1 .Values.replicas) }} pods; {{ mul 2 .Values.primaries (add1 .Values.replicas) }} during a blue/green rollout).
+
+Watch it converge:
+  kubectl get rediscluster,pods -n {{ .Release.Namespace }} -l redis_cluster_name={{ include "redis-cluster.fullname" . }}
+
+Connect:
+  kubectl exec -n {{ .Release.Namespace }} {{ include "redis-cluster.fullname" . }}-0 -c redis -- redis-cli -c PING
+{{- if .Values.tls.enabled }}
+  kubectl exec -n {{ .Release.Namespace }} {{ include "redis-cluster.fullname" . }}-0 -c redis -- redis-cli --tls --cacert /tls/ca.crt -p {{ .Values.tls.port }} -c PING
+{{- end }}

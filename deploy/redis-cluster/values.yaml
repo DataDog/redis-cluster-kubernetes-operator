@@ -1,0 +1,45 @@
+# Requires the redis-cluster-kubernetes-operator chart in the same namespace.
+nameOverride: ""
+fullnameOverride: ""
+
+primaries: 3
+# Replicas per primary.
+replicas: 1
+
+image:
+  repository: redis
+  tag: "8.6.0"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Redis Cluster node timeout in milliseconds.
+nodeTimeoutMs: 5000
+appendonly: true
+# Extra redis-server arguments appended after the managed ones.
+extraArgs: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+storage:
+  size: 1Gi
+  # Empty uses the cluster default StorageClass.
+  storageClassName: ""
+
+# Client TLS on a second port; the operator keeps the plaintext port.
+# The Secret holds tls.crt, tls.key and ca.crt (cert-manager layout).
+tls:
+  enabled: false
+  secretName: ""
+  port: 6380
+  # no | optional | yes (mTLS)
+  authClients: optional
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
