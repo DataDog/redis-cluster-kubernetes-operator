@@ -80,6 +80,9 @@ func NewClusterForTestMain(opts ...ClusterOpt) (*Cluster, func(), error) {
 }
 
 func newCluster(opts ...ClusterOpt) (*Cluster, func(), error) {
+	// Set the logger before cluster setup logs: controller-runtime ignores a
+	// logger set after it stops waiting, 30 s after process start.
+	quietTestLogs()
 	cfg := &clusterCfg{}
 	for _, opt := range opts {
 		opt(cfg)
