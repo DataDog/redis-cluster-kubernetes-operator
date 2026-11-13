@@ -46,10 +46,14 @@ Definitions:
 - **Termination during a scale-up rebalance can lose acknowledged writes.** The
   rebalance after a scale-up is one blocking call
   ([`controller/maintain.go`](../controller/maintain.go)), so a primary that
-  terminates while it runs gets no planned failover. In the validation run, 410
-  of 35,514 acknowledged writes were lost; all were written during the ~6 s
-  stall after the delete. A primary delete without a rebalance lost none. The
-  exact mechanism is under investigation.
+  terminates while it runs gets no planned failover. The pod restarts in about
+  3 s, faster than `cluster-node-timeout`, so no replica is promoted; with the
+  same node ID (from `nodes.conf` on its PVC) it rejoins as the primary of its
+  slots and acknowledges writes. About 4 s later a replica takes over and the
+  restarted node resyncs from it, discarding the writes the replica never got.
+  Two runs lost 410 of 35,514 and 441 acknowledged writes. A primary delete
+  without a rebalance lost none. Which component promotes the replica is not
+  yet confirmed: KIND runs do not capture operator logs.
 - **No PodDisruptionBudget.** The operator does not create one. Add one with
   `maxUnavailable: 1` so a node drain cannot take a primary and its replica at
   the same time.
