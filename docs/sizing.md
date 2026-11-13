@@ -18,8 +18,11 @@ whether data must survive a restart. Start from the table, then measure on a tes
 Pod count is `P × (1 + replicas)`. Every replica uses the same memory as its
 primary.
 
-Units: Redis `gb`/`mb` are binary, so `6gb` = `6Gi`. Round the memory limit up
-to a whole `Mi`/`Gi` value.
+Units: Redis `gb`/`mb` are binary, so `6gb` = `6Gi`. Round `--maxmemory` up to
+a whole `gb` (or `mb` below 1 GiB), then derive the memory limit from it.
+
+For a test cluster that cannot fit production values, keep `primaries`,
+`replicas` and the memory ratio, and shrink only `--maxmemory`.
 
 `replicas: 1` survives losing a pod. To survive losing a node, spread primaries
 and their replicas across nodes with pod anti-affinity (chart `affinity`) or

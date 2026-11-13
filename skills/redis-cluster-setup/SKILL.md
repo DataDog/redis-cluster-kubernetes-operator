@@ -110,7 +110,8 @@ check with its `detail` and `fix`. Do not retry by deleting resources.
 
 Give the user the Service name `NAME.NS.svc`, port `6379` (and the TLS port if
 enabled), and that clients must be cluster-aware (`redis-cli -c`, or a Redis
-Cluster client). Point them to `docs/operations.md`.
+Cluster client). The Service is headless: the name resolves to the pod IPs,
+which the client uses to discover the cluster. Point them to `docs/operations.md`.
 
 ## Rules
 
