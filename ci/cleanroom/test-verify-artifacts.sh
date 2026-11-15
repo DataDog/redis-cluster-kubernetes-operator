@@ -5,8 +5,10 @@
 
 set -euo pipefail
 
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly SCANNER="$REPO_ROOT/ci/cleanroom/verify-artifacts.sh"
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/verify-artifacts-test.XXXXXX")"
 readonly HEX36="0123456789abcdef0123456789abcdef0123"
 

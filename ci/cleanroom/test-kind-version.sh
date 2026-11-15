@@ -6,7 +6,9 @@
 
 set -euo pipefail
 
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kind-version-test.XXXXXX")"
 readonly FAKE_BIN="$TEMP_DIR/bin"
 

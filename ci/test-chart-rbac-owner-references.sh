@@ -10,8 +10,10 @@
 
 set -euo pipefail
 
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly RELEASE="chart-rbac-test"
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-chart-rbac.XXXXXX")"
 
 cleanup() {

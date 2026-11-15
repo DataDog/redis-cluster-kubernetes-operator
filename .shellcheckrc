@@ -8,6 +8,3 @@
 source-path=SCRIPTDIR
 external-sources=true
 
-# Repo-wide idiom: `readonly x="$(...)"` at the top of scripts. Splitting every
-# declaration has no correctness benefit for these call sites.
-disable=SC2155

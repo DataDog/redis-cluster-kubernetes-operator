@@ -5,6 +5,7 @@
 
 set -euo pipefail
 
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly CLUSTER_NAME="${LOCAL_KIND_CLUSTER:-redis-operator-dev}"
 readonly KIND_NODE_IMAGE="${LOCAL_KIND_NODE_IMAGE:-kindest/node:v1.33.1}"

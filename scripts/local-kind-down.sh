@@ -5,6 +5,7 @@
 
 set -euo pipefail
 
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly CLUSTER_NAME="${LOCAL_KIND_CLUSTER:-redis-operator-dev}"
 readonly KUBECONFIG_PATH="${LOCAL_KUBECONFIG:-$REPO_ROOT/.local/kubeconfig}"
