@@ -56,8 +56,11 @@ func ParseInfoField(info string, field string) int64 {
 }
 
 // ParseClusterNodesOutput parses CLUSTER NODES output and returns:
-// - ipToNodeID: map of IP address to node ID
-// - slotRangeToPrimaryIP: map of slot range (e.g. "0-3276") to primary IP
+//   - ipToNodeID: map of IP address to node ID
+//   - slotRangeToPrimaryIP: map of slot range to primary IP. Each slot token
+//     ("0-3276", or "100" for a single slot) is a key, and so is the primary's
+//     full comma-joined list ("0-100,200-300"), which is the format of
+//     ShardMappingEntry.SlotsRanges (see FormatSlotsRanges).
 func ParseClusterNodesOutput(clusterNodesStr string) (ipToNodeID map[string]string, slotRangeToPrimaryIP map[string]string) {
 	ipToNodeID = make(map[string]string)
 	slotRangeToPrimaryIP = make(map[string]string)
@@ -72,12 +75,14 @@ func ParseClusterNodesOutput(clusterNodesStr string) (ipToNodeID map[string]stri
 			continue
 		}
 		nodeID := fields[0]
-		ip := strings.Split(strings.Split(fields[1], "@")[0], ":")[0]
+		// Handles unbracketed IPv6 ("2001:db8::10:6379@16379") and the
+		// optional ",hostname" suffix.
+		ip, _, ok := redis_cluster.ParseClusterNodeAddress(fields[1])
 
 		// A node's "myself" entry reports an empty IP when cluster-announce-ip
 		// is unset. Mapping ip="" would let the querying node be misclassified
 		// (e.g. FORGET'd as if it were blue), so skip it.
-		if ip == "" {
+		if !ok || ip == "" {
 			continue
 		}
 
@@ -85,11 +90,19 @@ func ParseClusterNodesOutput(clusterNodesStr string) (ipToNodeID map[string]stri
 
 		if len(fields) >= 3 {
 			flags := fields[2]
-			if strings.Contains(flags, "master") && !strings.Contains(flags, "fail") && len(fields) >= 9 {
+			failed := hasNodeFlag(flags, "fail") || hasNodeFlag(flags, "fail?")
+			if hasNodeFlag(flags, "master") && !failed && len(fields) >= 9 {
+				var owned []string
 				for _, slotPart := range fields[8:] {
-					if strings.Contains(slotPart, "-") && !strings.HasPrefix(slotPart, "[") {
-						slotRangeToPrimaryIP[slotPart] = ip
+					// "[slot->-node]" / "[slot-<-node]" are migration markers, not owned slots.
+					if strings.HasPrefix(slotPart, "[") {
+						continue
 					}
+					slotRangeToPrimaryIP[slotPart] = ip
+					owned = append(owned, slotPart)
+				}
+				if len(owned) > 1 {
+					slotRangeToPrimaryIP[strings.Join(owned, ",")] = ip
 				}
 			}
 		}
