@@ -1,0 +1,4 @@
+# Resolve "$REPO_ROOT/..." sources relative to the repository root.
+source-path=SCRIPTDIR
+source-path=SCRIPTDIR/..
+source-path=SCRIPTDIR/../..

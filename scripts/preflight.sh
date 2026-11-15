@@ -10,7 +10,8 @@
 
 set -uo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
 readonly CRD_NAME="redisclusters.cache.datadoghq.com"
 readonly CRD_FILE="$REPO_ROOT/crds/redis-cluster-v1.yaml"
 readonly OPERATOR_SELECTOR="app.kubernetes.io/name=redis-cluster-kubernetes-operator,app.kubernetes.io/component=operator"
@@ -29,9 +30,11 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$namespace" ]] || { echo "usage: $0 --namespace NAMESPACE [--json]" >&2; exit 2; }
 
+# shellcheck disable=SC2034 # read by lib/report.sh
 REPORT_JSON="$json"
-# shellcheck source=lib/report.sh
+# shellcheck source=scripts/lib/report.sh
 source "$REPO_ROOT/scripts/lib/report.sh"
+# shellcheck disable=SC2034 # read by lib/report.sh
 REPORT_SUBJECT="\"namespace\":\"$(report_json_escape "$namespace")\","
 
 can_i() {

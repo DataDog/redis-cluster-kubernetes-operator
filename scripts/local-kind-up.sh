@@ -5,7 +5,8 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
 readonly CLUSTER_NAME="${LOCAL_KIND_CLUSTER:-redis-operator-dev}"
 readonly KIND_NODE_IMAGE="${LOCAL_KIND_NODE_IMAGE:-kindest/node:v1.33.1}"
 readonly NAMESPACE="redis-cluster-example"

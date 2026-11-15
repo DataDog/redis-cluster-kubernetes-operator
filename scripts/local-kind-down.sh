@@ -5,7 +5,8 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
 readonly CLUSTER_NAME="${LOCAL_KIND_CLUSTER:-redis-operator-dev}"
 readonly KUBECONFIG_PATH="${LOCAL_KUBECONFIG:-$REPO_ROOT/.local/kubeconfig}"
 readonly OWNERSHIP_PATH="${LOCAL_KIND_OWNERSHIP_FILE:-$REPO_ROOT/.local/kind-owner}"

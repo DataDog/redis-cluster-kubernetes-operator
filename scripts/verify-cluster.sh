@@ -12,7 +12,8 @@
 
 set -uo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
 readonly REDIS_CONTAINER="redis"
 readonly REDIS_PORT=6379
 readonly TOOLBOX_SELECTOR="app.kubernetes.io/component=toolbox"
@@ -48,9 +49,11 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$namespace" && -n "$name" && "$timeout" =~ ^[0-9]+$ ]] || usage
 
+# shellcheck disable=SC2034 # read by lib/report.sh
 REPORT_JSON="$json"
-# shellcheck source=lib/report.sh
+# shellcheck source=scripts/lib/report.sh
 source "$REPO_ROOT/scripts/lib/report.sh"
+# shellcheck disable=SC2034 # read by lib/report.sh
 REPORT_SUBJECT="\"namespace\":\"$(report_json_escape "$namespace")\",\"name\":\"$(report_json_escape "$name")\","
 
 # Results of the latest attempt; checks stop at the first one that is not pass.
@@ -118,6 +121,7 @@ redis_cli() {
 attempt() {
   results=()
   local spec
+  # shellcheck disable=SC2016 # go-template, not shell expansion
   if ! spec="$(kubectl get rediscluster "$name" --namespace "$namespace" -o go-template='{{.spec.primaries}}|{{.spec.replicas}}|{{or .status.blueGreen.phase ""}}|{{range $k, $v := .spec.statefulsetTemplate.spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}' 2>&1)"; then
     record resource fail "RedisCluster '$name' not readable: $spec" "kubectl get rediscluster --namespace $namespace"
     return
@@ -174,7 +178,8 @@ attempt() {
 
   [[ "$read_only" == true ]] && return
 
-  local key="rco:verify:$(date +%s)" value="ok-$$"
+  local key value="ok-$$"
+  key="rco:verify:$(date +%s)"
   if [[ "$(redis_cli -c SET "$key" "$value" EX "$PROBE_TTL_SECONDS")" != OK \
     || "$(redis_cli -c GET "$key")" != "$value" ]]; then
     record data fail "SET/GET of $key through cluster redirects failed" \
@@ -189,7 +194,8 @@ deadline=$((SECONDS + timeout))
 while :; do
   attempt
   last="${results[${#results[@]} - 1]}"
-  [[ "$(cut -f2 <<<"$last")" == pass || "$fatal" == true || SECONDS -ge deadline ]] && break
+  [[ "$(cut -f2 <<<"$last")" == pass || "$fatal" == true ]] && break
+  (( SECONDS >= deadline )) && break
   sleep "$POLL_SECONDS"
 done
 
