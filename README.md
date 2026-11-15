@@ -50,6 +50,29 @@ shows you the values before applying them, and finishes only when
 `scripts/verify-cluster.sh` passes. For a read-only check of existing clusters
 use `skills/redis-cluster-health/SKILL.md`.
 
+In Claude Code you can install the skills as a plugin:
+
+```text
+/plugin marketplace add DataDog/redis-cluster-kubernetes-operator
+/plugin install redis-cluster-operator@redis-cluster-kubernetes-operator
+```
+
+The skills still run the repository's scripts, so work from a clone. Other
+agents can start from [llms.txt](llms.txt).
+
+Guardrails the skills follow, and that you should expect from any agent:
+
+- Confirm the kubeconfig context with you before applying anything to a
+  cluster that is not a local KIND cluster, and never switch context.
+- Never delete RedisClusters, PVCs, StatefulSets or namespaces, and never edit
+  `status`.
+- Announce pod-template changes first: they start a blue/green rollout that
+  doubles pods.
+- Act on the `fix` of each failing check in `scripts/preflight.sh --json` and
+  `scripts/verify-cluster.sh --json` instead of guessing.
+
+Contributing with an agent? [AGENTS.md](AGENTS.md) covers repository rules.
+
 ## Install
 
 Prerequisites are Helm 3 and a Kubernetes 1.33 cluster. Until a release image is published, build and load the operator image into your registry or local cluster:
@@ -234,7 +257,8 @@ portability.
 - [Operations guide](docs/operations.md)
 - [RedisCluster API reference](docs/api-reference.md)
 - [Sizing](docs/sizing.md)
-- [Agent skills](AGENTS.md)
+- [Agent skills](skills/) and [llms.txt](llms.txt)
+- [Contributor and agent rules](AGENTS.md)
 - [Example workload](examples/README.md)
 - [Deployed-operator clean-room tests](test/blackbox/README.md)
 - [In-process KIND tests](e2e/README.md)

@@ -27,6 +27,20 @@ clean-cluster installation test. Use `make local-up` for an interactive cluster
 or `make cleanroom-smoke` for the disposable packaged-operator gate. Backup,
 authentication, toolbox, and command-execution changes require security review.
 
+## AI-assisted contributions
+
+AI tools are welcome. [AGENTS.md](AGENTS.md) holds the repository rules agents
+must follow.
+
+- You, the human submitter, are responsible for every change: you have read
+  it, understand it, can explain it in review, and ran the tests you report.
+- Open an issue before a non-trivial PR (behavior, API, CRD, dependency or
+  security changes) so maintainers can agree on the approach.
+- Do not include fabricated links, issues, citations, benchmarks or test
+  results. Link only what you checked.
+- Disclose AI use in the PR template: which tool, and what it did.
+- Review comments go to you; do not reply with unedited AI output.
+
 ## Pull requests
 
 Keep changes focused, explain compatibility and security impact, and document verification. By contributing, you agree that your contribution is licensed under Apache-2.0.
