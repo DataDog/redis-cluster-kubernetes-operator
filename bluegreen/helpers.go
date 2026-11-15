@@ -524,7 +524,8 @@ func allNodesSeenAsMaster(clusterNodes string, wantMaster map[string]bool) bool 
 			continue
 		}
 		flags := fields[2]
-		if strings.Contains(flags, "master") && !strings.Contains(flags, "fail") {
+		// Match whole flags: a substring test for "fail" also matches "nofailover".
+		if hasNodeFlag(flags, "master") && !hasNodeFlag(flags, "fail") && !hasNodeFlag(flags, "fail?") {
 			found[nodeID] = true
 		}
 	}

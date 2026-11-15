@@ -367,3 +367,20 @@ func TestClusterNodesProbeIPsPrefersCurrentPods(t *testing.T) {
 	assert.Equal(t, []string{"10.0.0.2", "10.0.0.9"},
 		clusterNodesProbeIPs(cluster, mappings))
 }
+
+// "nofailover" contains the substring "fail"; it must not hide a healthy master.
+func TestAllNodesSeenAsMasterIgnoresNofailover(t *testing.T) {
+	const (
+		a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	want := map[string]bool{a: true, b: true}
+
+	healthy := a + " 10.0.1.0:6379@16379 myself,master,nofailover - 0 0 1 connected 0-8191\n" +
+		b + " 10.0.1.1:6379@16379 master,nofailover - 0 0 2 connected 8192-16383\n"
+	assert.True(t, allNodesSeenAsMaster(healthy, want))
+
+	failing := a + " 10.0.1.0:6379@16379 myself,master,nofailover - 0 0 1 connected 0-8191\n" +
+		b + " 10.0.1.1:6379@16379 master,nofailover,fail? - 0 0 2 connected 8192-16383\n"
+	assert.False(t, allNodesSeenAsMaster(failing, want), "fail? must still count as not healthy")
+}
