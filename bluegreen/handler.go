@@ -569,7 +569,7 @@ func (h *Handler) bgSetupReplication(ctx context.Context, cluster *redis_cluster
 			"greenPodIP", greenPod.Status.PodIP,
 			"slots", slotsStr)
 
-		greenAlreadyInCluster := blueClusterNodes != "" && strings.Contains(blueClusterNodes, greenPod.Status.PodIP)
+		greenAlreadyInCluster := clusterNodesContainIP(blueClusterNodes, bluePrimaries[0].IP, greenPod.Status.PodIP)
 
 		var greenNodeID string
 		if !greenAlreadyInCluster {
@@ -626,6 +626,18 @@ func (h *Handler) bgSetupReplication(ctx context.Context, cluster *redis_cluster
 	h.log.Info("Replication setup complete, waiting for sync", "shards", len(shardMapping),
 		"replicating_duration_ms", replicatingDuration)
 	return ctrl.Result{RequeueAfter: constants.BlueGreenSyncCheckDelay}, health.Warn, nil
+}
+
+// clusterNodesContainIP reports whether a CLUSTER NODES snapshot, read from
+// viewerIP, lists a node at exactly ip. A substring test on the raw output is
+// not enough: 10.244.1.5 would match a node at 10.244.1.53.
+func clusterNodesContainIP(clusterNodes, viewerIP, ip string) bool {
+	if clusterNodes == "" || ip == "" {
+		return false
+	}
+	_, ipToID := parseClusterNodesFrom(clusterNodes, viewerIP)
+	_, found := ipToID[ip]
+	return found
 }
 
 // ────────────────────────────────────────────────────────────────────────────
