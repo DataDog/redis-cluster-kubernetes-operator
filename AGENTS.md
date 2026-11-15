@@ -36,6 +36,7 @@ go test ./...
 go vet ./...
 helm lint . --strict --kube-version 1.33.0
 make verify-crd-contract verify-license-inventory
+scripts/test-agent-scripts.sh   # offline tests for preflight.sh and verify-cluster.sh
 ```
 
 E2E runs one lane on a throwaway KIND cluster (Docker, KIND v0.30.0+). Lanes and

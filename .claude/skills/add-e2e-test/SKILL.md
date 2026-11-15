@@ -11,8 +11,9 @@ description: Add an in-process KIND e2e test and register it in an e2e lane. Use
 2. Assert the behavior the fix guarantees (topology, data, slot ownership), and
    check the test fails without the fix.
 3. Add the exact test name to one lane in `ci/e2e-lanes.txt`:
-   - `smoke`: fast, every PR
    - `default`: core behavior, under ~75 min for the lane
+   - `smoke`: a fast subset of `default` run on every PR. A smoke test must
+     also be listed in `default` (`e2e/lane_manifest_test.go` enforces it)
    - `slow`, `bg-stuck`, `loadgen`: long or load tests (`E2E_SLOW=1`)
 4. Verify the manifest and the lane:
    ```sh
