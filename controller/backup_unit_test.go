@@ -7,12 +7,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	cachev1 "github.com/DataDog/redis-cluster-kubernetes-operator/apiv1"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/metrics"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/redis_cluster"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -394,4 +397,209 @@ func TestRotateLatestPropagatesProbeAndRotationFailures(t *testing.T) {
 	store = &promotionStore{exists: true, failures: map[string]error{"copy:cluster/latest:cluster/previous": copyErr}}
 	_, err = rotateLatestToPrevious(context.Background(), store, "cluster/latest", "cluster/previous")
 	require.ErrorIs(t, err, copyErr)
+}
+
+func TestReplaceLatestFirstBackupClearsPartialCopy(t *testing.T) {
+	promotionErr := errors.New("copy interrupted")
+	store := &promotionStore{failures: map[string]error{"copy:cluster/in-progress:cluster/latest": promotionErr}}
+	err := replaceLatestWithInProgress(context.Background(), store, "cluster/in-progress", "cluster/latest", "cluster/previous", false)
+	require.ErrorIs(t, err, promotionErr)
+	assert.Equal(t, []string{
+		"delete:cluster/latest",
+		"copy:cluster/in-progress:cluster/latest",
+		"delete:cluster/latest",
+	}, store.calls, "partial latest must be cleared when there is nothing to roll back to")
+	assert.NotContains(t, store.calls, "delete:cluster/in-progress")
+}
+
+// objectStore is an in-memory BackupStore. When failCopyTo is set, a copy into
+// that prefix writes one object and then fails, like an interrupted
+// `aws s3 cp --recursive`.
+type objectStore struct {
+	objects      map[string][]byte
+	failCopyTo   string
+	downloadErrs map[string]error
+}
+
+func (s *objectStore) UploadFile(context.Context, string, string) error   { return nil }
+func (s *objectStore) DownloadFile(context.Context, string, string) error { return nil }
+func (s *objectStore) UploadBytes(_ context.Context, data []byte, key string) error {
+	s.objects[key] = data
+	return nil
+}
+func (s *objectStore) DownloadBytes(_ context.Context, key string) ([]byte, error) {
+	if err := s.downloadErrs[key]; err != nil {
+		return nil, err
+	}
+	data, ok := s.objects[key]
+	if !ok {
+		return nil, &BackendError{Kind: BackendNotFound, Operation: "download"}
+	}
+	return data, nil
+}
+func (s *objectStore) CopyPrefix(_ context.Context, src, dst string) error {
+	var keys []string
+	for key := range s.objects {
+		if strings.HasPrefix(key, src+"/") {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for i, key := range keys {
+		if dst == s.failCopyTo && i == 1 {
+			return &BackendError{Kind: BackendNetwork, Operation: "copy"}
+		}
+		s.objects[dst+"/"+strings.TrimPrefix(key, src+"/")] = s.objects[key]
+	}
+	return nil
+}
+func (s *objectStore) DeletePrefix(_ context.Context, prefix string) error {
+	for key := range s.objects {
+		if strings.HasPrefix(key, prefix+"/") {
+			delete(s.objects, key)
+		}
+	}
+	return nil
+}
+func (s *objectStore) Exists(_ context.Context, prefix string) (bool, error) {
+	for key := range s.objects {
+		if strings.HasPrefix(key, prefix+"/") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func newObjectStoreReconciler(t *testing.T, store *objectStore) (*RedisClusterReconciler, *redis_cluster.Cluster, BackupProvider) {
+	t.Helper()
+	r := &RedisClusterReconciler{
+		ClusterClient: redis_cluster.ClusterClient{Log: logr.Discard()},
+		BackupBackendFactory: BackupBackendFactoryFunc(func(string, string) (BackupProvider, error) {
+			return backupProviderFunc(func(BackendCommandExecutor) BackupStore { return store }), nil
+		}),
+	}
+	cluster := &redis_cluster.Cluster{
+		RedisCluster: &cachev1.RedisCluster{},
+		AllNodes:     []*redis_cluster.ClusterNode{{PodName: "cache-0", PodIndex: 0}},
+	}
+	cluster.RedisCluster.Namespace, cluster.RedisCluster.Name = "ns", "cache"
+	backend, err := r.backupBackend(cluster)
+	require.NoError(t, err)
+	return r, cluster, backend
+}
+
+// An interrupted first promotion used to leave a partial latest behind. Every
+// later promotion then refused to run, so no backup was ever promoted again.
+func TestPromoteRecoversAfterInterruptedFirstPromotion(t *testing.T) {
+	store := &objectStore{objects: map[string][]byte{}}
+	r, cluster, backend := newObjectStoreReconciler(t, store)
+	ctx := context.Background()
+	inProgress, latest, previous := r.inProgressBackupPath(cluster), r.latestBackupPath(cluster), r.previousBackupPath(cluster)
+	stage := func(generation string) {
+		store.objects[inProgress+"/0/dump.rdb"] = []byte("rdb-" + generation)
+		store.objects[inProgress+"/0/nodes.conf"] = []byte("nodes-" + generation)
+		store.objects[inProgress+"/manifest.json"] = []byte("{}")
+	}
+
+	stage("1")
+	store.failCopyTo = latest
+	require.Error(t, r.promoteInProgressBackup(ctx, cluster, backend, inProgress, latest, previous))
+	exists, err := store.Exists(ctx, latest)
+	require.NoError(t, err)
+	assert.False(t, exists, "partial latest must not be left behind")
+
+	store.failCopyTo = ""
+	require.NoError(t, r.clearInProgressBackup(ctx, cluster, backend, inProgress))
+	stage("2")
+	require.NoError(t, r.promoteInProgressBackup(ctx, cluster, backend, inProgress, latest, previous))
+	assert.Equal(t, []byte("rdb-2"), store.objects[latest+"/0/dump.rdb"])
+}
+
+// An invalid latest (e.g. partial copy from an older operator, or an expired
+// object) must be replaced by the next complete backup, without being rotated
+// over a good previous.
+func TestPromoteReplacesInvalidLatestWithoutTouchingPrevious(t *testing.T) {
+	store := &objectStore{objects: map[string][]byte{}}
+	r, cluster, backend := newObjectStoreReconciler(t, store)
+	ctx := context.Background()
+	inProgress, latest, previous := r.inProgressBackupPath(cluster), r.latestBackupPath(cluster), r.previousBackupPath(cluster)
+
+	store.objects[previous+"/0/dump.rdb"] = []byte("rdb-good-previous")
+	store.objects[latest+"/0/dump.rdb"] = []byte("rdb-partial") // no manifest: invalid
+	store.objects[inProgress+"/0/dump.rdb"] = []byte("rdb-new")
+	store.objects[inProgress+"/manifest.json"] = []byte("{}")
+
+	require.NoError(t, r.promoteInProgressBackup(ctx, cluster, backend, inProgress, latest, previous))
+	assert.Equal(t, []byte("rdb-new"), store.objects[latest+"/0/dump.rdb"])
+	assert.Equal(t, []byte("rdb-good-previous"), store.objects[previous+"/0/dump.rdb"], "invalid latest must not overwrite previous")
+	exists, err := store.Exists(ctx, inProgress)
+	require.NoError(t, err)
+	assert.False(t, exists)
+}
+
+// A latest whose manifest cannot be parsed is invalid in the same way as one
+// with no manifest, and is replaced without touching previous.
+func TestPromoteReplacesLatestWithMalformedManifest(t *testing.T) {
+	store := &objectStore{objects: map[string][]byte{}}
+	r, cluster, backend := newObjectStoreReconciler(t, store)
+	ctx := context.Background()
+	inProgress, latest, previous := r.inProgressBackupPath(cluster), r.latestBackupPath(cluster), r.previousBackupPath(cluster)
+
+	store.objects[previous+"/0/dump.rdb"] = []byte("rdb-good-previous")
+	store.objects[latest+"/0/dump.rdb"] = []byte("rdb-corrupt")
+	store.objects[latest+"/manifest.json"] = []byte("not json")
+	store.objects[inProgress+"/0/dump.rdb"] = []byte("rdb-new")
+	store.objects[inProgress+"/manifest.json"] = []byte("{}")
+
+	require.NoError(t, r.promoteInProgressBackup(ctx, cluster, backend, inProgress, latest, previous))
+	assert.Equal(t, []byte("rdb-new"), store.objects[latest+"/0/dump.rdb"])
+	assert.Equal(t, []byte("rdb-good-previous"), store.objects[previous+"/0/dump.rdb"])
+}
+
+// A transport error while reading latest's manifest says nothing about
+// whether latest is valid. Promotion must refuse and leave latest, previous
+// and the staged backup exactly as they were.
+func TestPromoteRefusesWhenLatestCannotBeInspected(t *testing.T) {
+	store := &objectStore{objects: map[string][]byte{}}
+	r, cluster, backend := newObjectStoreReconciler(t, store)
+	ctx := context.Background()
+	inProgress, latest, previous := r.inProgressBackupPath(cluster), r.latestBackupPath(cluster), r.previousBackupPath(cluster)
+
+	store.objects[previous+"/0/dump.rdb"] = []byte("rdb-previous")
+	store.objects[latest+"/0/dump.rdb"] = []byte("rdb-latest")
+	store.objects[latest+"/manifest.json"] = []byte("{}")
+	store.objects[inProgress+"/0/dump.rdb"] = []byte("rdb-new")
+	store.objects[inProgress+"/manifest.json"] = []byte("{}")
+	store.downloadErrs = map[string]error{
+		latest + "/manifest.json": &BackendError{Kind: BackendNetwork, Operation: "download"},
+	}
+
+	err := r.promoteInProgressBackup(ctx, cluster, backend, inProgress, latest, previous)
+	require.ErrorContains(t, err, "refusing to replace previous with invalid latest backup")
+	assert.Equal(t, []byte("rdb-latest"), store.objects[latest+"/0/dump.rdb"], "latest must not be deleted")
+	assert.Equal(t, []byte("rdb-previous"), store.objects[previous+"/0/dump.rdb"], "previous must not be overwritten")
+	assert.Equal(t, []byte("rdb-new"), store.objects[inProgress+"/0/dump.rdb"], "staged backup must be retained")
+}
+
+func TestIsBackupGenerationInvalid(t *testing.T) {
+	notFound := &BackendError{Kind: BackendNotFound, Operation: "download"}
+	network := &BackendError{Kind: BackendNetwork, Operation: "download"}
+	badManifest := &invalidBackupManifestError{err: errors.New("failed to parse manifest: EOF")}
+
+	cases := map[string]struct {
+		err     error
+		invalid bool
+	}{
+		"manifest not found":    {fmt.Errorf("failed to download manifest: %w", notFound), true},
+		"artifact not found":    {fmt.Errorf("backup generation validation failed: %w", fmt.Errorf("failed to stage artifact: %w", notFound)), true},
+		"malformed manifest":    {badManifest, true},
+		"network error":         {fmt.Errorf("failed to download manifest: %w", network), false},
+		"toolbox or exec error": {errors.New("failed to inspect artifact"), false},
+		"context deadline":      {context.DeadlineExceeded, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.invalid, isBackupGenerationInvalid(tc.err))
+		})
+	}
 }

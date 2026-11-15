@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -227,6 +228,8 @@ func TestBackendErrorClassificationRecognizesNativeProviderCodes(t *testing.T) {
 		{backendAzure, "AuthorizationPermissionMismatch", BackendAuthentication},
 		{backendS3, "Could not connect to endpoint URL", BackendNetwork},
 		{backendS3, "NoSuchKey", BackendNotFound},
+		{backendS3, "fatal error: An error occurred (404) when calling the HeadObject operation: Not Found", BackendNotFound},
+		{backendS3, "fatal error: An error occurred (403) when calling the HeadObject operation: Forbidden", BackendAuthentication},
 		{backendGCS, "No URLs matched", BackendNotFound},
 		{backendAzure, "BlobNotFound", BackendNotFound},
 		{backendGCS, "BlobNotFound", BackendFailure},
@@ -576,4 +579,21 @@ func TestEveryTypedOperationPropagatesProviderFailureForEveryBackend(t *testing.
 			}
 		})
 	}
+}
+
+// A missing manifest on S3 must classify as not found end to end, otherwise an
+// invalid latest generation is never recognised and promotion stays wedged.
+func TestS3DownloadOfMissingKeyIsNotFound(t *testing.T) {
+	backend, err := defaultBackupBackends.NewBackupBackend("s3", "my-bucket")
+	require.NoError(t, err)
+	exec := &recordingBackendExecutor{responses: []BackendCommandResult{{
+		ExitCode: 1,
+		Stderr:   "fatal error: An error occurred (404) when calling the HeadObject operation: Not Found\n",
+	}}}
+
+	_, err = backend.Bind(exec).DownloadBytes(context.Background(), "ns/cache/latest/manifest.json")
+
+	require.Error(t, err)
+	assert.True(t, IsBackendNotFound(err), "got %v", err)
+	assert.True(t, isBackupGenerationInvalid(fmt.Errorf("failed to download manifest: %w", err)))
 }
