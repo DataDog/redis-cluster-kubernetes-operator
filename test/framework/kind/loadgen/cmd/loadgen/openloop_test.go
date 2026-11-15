@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -43,4 +44,16 @@ func TestTimelineBucketsByScheduledSecond(t *testing.T) {
 	require.Len(t, rows[0].Errors, 1, "errors differing only by host or IP share a kind")
 	assert.Equal(t, "dial tcp: lookup host-1: no such host", rows[0].Errors["dial tcp"])
 	assert.Equal(t, int64(1_001), rows[1].Unix)
+}
+
+func TestCutOffByPause(t *testing.T) {
+	live := context.Background()
+	paused, pause := context.WithCancel(context.Background())
+	pause()
+	failure := errors.New("dial tcp: connection refused")
+
+	assert.False(t, cutOffByPause(live, failure), "a failure while running is recorded")
+	assert.False(t, cutOffByPause(paused, nil), "a success that finished after pause is recorded")
+	assert.True(t, cutOffByPause(paused, context.Canceled), "a request cancelled by pause is not")
+	assert.True(t, cutOffByPause(paused, failure))
 }

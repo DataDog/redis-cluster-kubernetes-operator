@@ -88,7 +88,16 @@ func (g *generator) runScheduled(ctx context.Context, op scheduledOp) {
 	if errors.Is(err, errNothingWritten) {
 		err = g.doSet(ctx, op.seq)
 	}
+	if cutOffByPause(ctx, err) {
+		return
+	}
 	g.timeline.record(op.at, time.Since(op.at), err)
+}
+
+// cutOffByPause reports whether a request failed only because /pause cancelled
+// it; its outcome is unknown, so it is not a failure of the cluster.
+func cutOffByPause(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() != nil
 }
 
 // timeline aggregates open-loop results by scheduled second.
