@@ -7,9 +7,11 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
 readonly FIXTURES="$REPO_ROOT/ci/testdata/nightly-alert"
-readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nightly-alert-test.XXXXXX")"
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nightly-alert-test.XXXXXX")"
+readonly TEMP_DIR
 readonly SHIM_BIN="$TEMP_DIR/bin"
 readonly REPO='DataDog/redis-cluster-kubernetes-operator'
 trap 'rm -rf "$TEMP_DIR"' EXIT
@@ -77,7 +79,11 @@ EOF
 
 assert_no_log_text() {
   local file="$1"
-  ! grep -Eq 'ghp_|SECRET|pwned|touch|##\[|812\.34s|suite\.go' "$file" || fail "log text leaked into $file"
+  # Rejected fixture lines: embedded marker mid-line, credential-looking tokens
+  # (ghp_/gho_/AKIA/xox), a name without a Test prefix, missing, malformed, or
+  # trailing duration suffixes, and an overlong name.
+  ! grep -Eq 'ghp_|gho_|AKIA|xox|SECRET|pwned|touch|##\[|812\.34s|suite\.go|EmbeddedMidLine|helperNotATest|MissingDuration|MalformedDuration|TrailingText|TestOverlong' "$file" \
+    || fail "log text leaked into $file"
 }
 
 export CALLS="$TEMP_DIR/calls"

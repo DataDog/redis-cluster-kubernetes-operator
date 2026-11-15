@@ -44,29 +44,53 @@ done
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/nightly-alert.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 
+# A Go test name as printed in a failure record: a Test/Fuzz/Example/Benchmark
+# top-level name with optional /subtest segments, capped in length.
+readonly TEST_NAME_RE='^(Test|Fuzz|Example|Benchmark)[A-Za-z0-9_]*(/[A-Za-z0-9_.-]+)*$'
+readonly MAX_TEST_NAME_LEN=200
+readonly MARKER_TIMED_OUT='(test binary timed out)'
+readonly MARKER_NOT_FOUND='(no test name found; see job log)'
+
+valid_test_name() {
+  [[ ${#1} -le $MAX_TEST_NAME_LEN && "$1" =~ $TEST_NAME_RE ]]
+}
+
 # extract_tests LOG_FILE: print up to MAX_TESTS_PER_JOB unique failing test
-# names, or a fixed marker when none can be found.
+# names, or a fixed marker when none can be found. Only complete Go failure
+# records count: after the Actions timestamp prefix, the line must be optional
+# whitespace, "--- FAIL: ", a test name, and " (<seconds>s)" at end of line.
 extract_tests() {
-  local log_file="$1" names
-  names="$(grep -oE -- '--- FAIL: [A-Za-z0-9_/.-]+' "$log_file" \
-    | sed 's/^--- FAIL: //' \
-    | awk -v max="$MAX_TESTS_PER_JOB" '!seen[$0]++ && n < max { print; n++ }' || true)"
+  local log_file="$1" names='' line count=0
+  while IFS= read -r line; do
+    valid_test_name "$line" || continue
+    [[ $'\n'"$names" == *$'\n'"$line"$'\n'* ]] && continue
+    names+="$line"$'\n'
+    count=$((count + 1))
+    [[ $count -lt $MAX_TESTS_PER_JOB ]] || break
+  done < <(sed -E \
+    -e 's/\r$//' \
+    -e 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z //' \
+    "$log_file" \
+    | sed -nE 's/^[[:space:]]*--- FAIL: ([^ ]+) \([0-9]+(\.[0-9]+)?s\)$/\1/p')
   if [[ -n "$names" ]]; then
-    printf '%s\n' "$names"
+    printf '%s' "$names"
   elif grep -q 'panic: test timed out' "$log_file"; then
-    echo '(test binary timed out)'
+    echo "$MARKER_TIMED_OUT"
   else
-    echo '(no test name found; see job log)'
+    echo "$MARKER_NOT_FOUND"
   fi
 }
 
-# format_tests: join test names from stdin with ", ", wrapping each Go test name
-# in backticks and leaving fixed markers as plain text.
+# format_tests: join validated test names from stdin with ", ", wrapping each
+# in backticks. Fixed markers pass through as plain text; anything else is
+# dropped.
 format_tests() {
   local line out=''
   while IFS= read -r line; do
-    if [[ "$line" == Test* ]]; then
+    if valid_test_name "$line"; then
       line="\`$line\`"
+    elif [[ "$line" != "$MARKER_TIMED_OUT" && "$line" != "$MARKER_NOT_FOUND" ]]; then
+      continue
     fi
     out+="${out:+, }$line"
   done
