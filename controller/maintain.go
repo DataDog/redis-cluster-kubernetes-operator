@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -942,27 +943,32 @@ func orderReplicasNonDrainingFirst(replicas []*redis_cluster.ClusterNode) []*red
 	return ordered
 }
 
-// podNodesWithoutID splits the pod-backed nodes whose Redis node ID is not known yet
-// into pods created within grace of now (Redis may still be starting) and older
-// pods (Redis is likely stuck, e.g. crash looping or a broken nodes.conf).
-func podNodesWithoutID(cluster *redis_cluster.Cluster, now time.Time, grace time.Duration) (starting, stuck []*redis_cluster.ClusterNode) {
+// podsWithoutNodeID returns, in index order, the pods whose Redis has not
+// reported a node ID: listed pods still starting, and expected StatefulSet pods
+// that are not listed because they are missing or not Running yet.
+func podsWithoutNodeID(cluster *redis_cluster.Cluster) []string {
+	reporting := make(map[int]bool)
+	waiting := make(map[int]string)
 	for _, n := range cluster.AllNodes {
-		if n == nil || n.PodIndex < 0 || n.ID != "" {
+		if n == nil || n.PodIndex < 0 {
 			continue
 		}
-		if n.PodCreation > 0 && now.Sub(time.Unix(n.PodCreation, 0)) < grace {
-			starting = append(starting, n)
+		if n.ID != "" {
+			reporting[n.PodIndex] = true
 		} else {
-			stuck = append(stuck, n)
+			waiting[n.PodIndex] = n.PodName
 		}
 	}
-	return starting, stuck
-}
-
-func podNames(nodes []*redis_cluster.ClusterNode) []string {
-	names := make([]string, 0, len(nodes))
-	for _, n := range nodes {
-		names = append(names, n.PodName)
+	if sts := cluster.StatefulSet; sts != nil && sts.Spec.Replicas != nil {
+		for i := 0; i < int(*sts.Spec.Replicas); i++ {
+			if !reporting[i] && waiting[i] == "" {
+				waiting[i] = fmt.Sprintf("%s-%d", sts.Name, i)
+			}
+		}
+	}
+	names := make([]string, 0, len(waiting))
+	for _, i := range slices.Sorted(maps.Keys(waiting)) {
+		names = append(names, waiting[i])
 	}
 	return names
 }
@@ -976,6 +982,7 @@ func (r *RedisClusterReconciler) forgetZombies(ctx context.Context, cluster *red
 	_ = r.Metrics.Gauge(metrics.GaugeZombieNodes, float64(zombieCount))
 
 	if zombieCount == 0 {
+		r.zombieTracker().Observe(zombieTrackerKey(cluster), nil, time.Now())
 		return cluster, nil
 	}
 
@@ -983,45 +990,60 @@ func (r *RedisClusterReconciler) forgetZombies(ctx context.Context, cluster *red
 
 	zombieIDs := redis_cluster.GetNodeIDs(cluster.Nodes[redis_cluster.ZombieNode])
 
-	// A running pod whose Redis has not reported its node ID yet (e.g. it was just
-	// recreated and Redis is still starting) may be the owner of a "zombie" ID that
-	// peers still list at the pod's previous IP. FORGETting it would evict a live
-	// node, so defer zombie cleanup while such a pod is new. Once a pod is older than
-	// OperationTimeout its Redis is likely stuck, so stop deferring: otherwise one
-	// broken pod would block zombie cleanup forever.
+	// A zombie ID may belong to a pod whose Redis has not reported a node ID yet:
+	// a recreated pod keeps its nodes.conf, but until its Redis is up, peers list
+	// the ID at the pod's previous IP. FORGETting it would evict a live node. So
+	// while any pod has no node ID, forget only zombies seen for OperationTimeout:
+	// by then that Redis is likely stuck, and one broken pod must not block
+	// cleanup forever.
 	grace := constants.OperationTimeout
 	if cluster.Timeouts != nil {
 		grace = cluster.Timeouts.OperationTimeout
 	}
-	starting, stuck := podNodesWithoutID(cluster, time.Now(), grace)
-	if len(starting) > 0 {
-		log.Info("Deferring zombie cleanup: some new pods have not reported a Redis node ID yet",
-			"zombieIDs", zombieIDs,
-			"podsWithoutID", podNames(starting),
-			"grace", grace)
-		for _, n := range starting {
-			_ = r.Metrics.CountBadSituation("zombie_forget_deferred_pod_without_id", "pod_name:"+n.PodName)
+	now := time.Now()
+	firstSeen := r.zombieTracker().Observe(zombieTrackerKey(cluster), zombieIDs, now)
+	zombies := cluster.Nodes[redis_cluster.ZombieNode]
+	if waiting := podsWithoutNodeID(cluster); len(waiting) > 0 {
+		var due, deferred []*redis_cluster.ClusterNode
+		for _, z := range zombies {
+			if now.Sub(firstSeen[z.ID]) >= grace {
+				due = append(due, z)
+			} else {
+				deferred = append(deferred, z)
+			}
 		}
-		return cluster, nil
-	}
-	if len(stuck) > 0 {
-		log.Info("Proceeding with zombie cleanup: pods without a Redis node ID are past the startup grace period",
-			"zombieIDs", zombieIDs,
-			"podsWithoutID", podNames(stuck),
-			"grace", grace)
-		for _, n := range stuck {
-			_ = r.Metrics.CountBadSituation("zombie_forget_pod_without_id_past_grace", "pod_name:"+n.PodName)
+		if len(deferred) > 0 {
+			log.Info("Deferring zombie cleanup: some pods have not reported a Redis node ID yet",
+				"zombieIDs", redis_cluster.GetNodeIDs(deferred),
+				"podsWithoutID", waiting,
+				"grace", grace)
+			for _, name := range waiting {
+				_ = r.Metrics.CountBadSituation("zombie_forget_deferred_pod_without_id", "pod_name:"+name)
+			}
 		}
+		if len(due) > 0 {
+			log.Info("Proceeding with zombie cleanup: zombies outlived the startup grace period of pods without a Redis node ID",
+				"zombieIDs", redis_cluster.GetNodeIDs(due),
+				"podsWithoutID", waiting,
+				"grace", grace)
+			for _, name := range waiting {
+				_ = r.Metrics.CountBadSituation("zombie_forget_pod_without_id_past_grace", "pod_name:"+name)
+			}
+		}
+		if len(due) == 0 {
+			return cluster, nil
+		}
+		zombies = due
 	}
 	log.Info("Detected zombie nodes to forget",
-		"zombieCount", zombieCount,
-		"zombieIDs", zombieIDs,
+		"zombieCount", len(zombies),
+		"zombieIDs", redis_cluster.GetNodeIDs(zombies),
 		"totalClusterNodes", len(cluster.AllNodes),
 		"healthyNodes", cluster.HealthyNodeCount())
 
-	for i, zombieNode := range cluster.Nodes[redis_cluster.ZombieNode] {
+	for i, zombieNode := range zombies {
 		log.Info("Forgetting zombie node", "nodeId", zombieNode.ID, "flags", zombieNode.Flags,
-			"progress", fmt.Sprintf("%d/%d", i+1, zombieCount))
+			"progress", fmt.Sprintf("%d/%d", i+1, len(zombies)))
 		forgetNode(ctx, cluster, zombieNode, log, r.Metrics)
 	}
 
@@ -1031,13 +1053,17 @@ func (r *RedisClusterReconciler) forgetZombies(ctx context.Context, cluster *red
 		return refreshedCluster, err
 	}
 
-	remainingZombieCount := len(refreshedCluster.Nodes[redis_cluster.ZombieNode])
-	_ = r.Metrics.Gauge(metrics.GaugeZombieNodes, float64(remainingZombieCount))
+	_ = r.Metrics.Gauge(metrics.GaugeZombieNodes, float64(len(refreshedCluster.Nodes[redis_cluster.ZombieNode])))
 
-	// Log error if zombies persist after forget (gossip may have re-added them)
-	if remainingZombieCount > 0 {
-		remainingZombieIDs := redis_cluster.GetNodeIDs(refreshedCluster.Nodes[redis_cluster.ZombieNode])
-
+	// Log error if forgotten zombies persist (gossip may have re-added them)
+	forgotten := redis_cluster.GetNodeIDs(zombies)
+	var remainingZombieIDs []string
+	for _, z := range refreshedCluster.Nodes[redis_cluster.ZombieNode] {
+		if slices.Contains(forgotten, z.ID) {
+			remainingZombieIDs = append(remainingZombieIDs, z.ID)
+		}
+	}
+	if remainingZombieCount := len(remainingZombieIDs); remainingZombieCount > 0 {
 		// Find which healthy nodes still see each zombie - critical for debugging gossip issues
 		nodesStillSeeingZombies := getNodesStillSeeingZombies(refreshedCluster)
 
@@ -1045,7 +1071,7 @@ func (r *RedisClusterReconciler) forgetZombies(ctx context.Context, cluster *red
 		log.Error(err, "Zombies persist - gossip may have re-added them before all nodes received FORGET",
 			"remainingCount", remainingZombieCount,
 			"remainingIDs", remainingZombieIDs,
-			"originalIDs", zombieIDs,
+			"originalIDs", forgotten,
 			"nodesStillSeeingZombies", nodesStillSeeingZombies)
 		_ = r.Metrics.Count(counters.ZombiePersisted)
 		_ = r.Metrics.CountBadSituation("zombie_persisted_after_forget")
