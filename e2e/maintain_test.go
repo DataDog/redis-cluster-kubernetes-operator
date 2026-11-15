@@ -6,9 +6,11 @@
 package e2e
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
+	rckind "github.com/DataDog/redis-cluster-kubernetes-operator/test/framework/kind"
 	"github.com/DataDog/redis-cluster-kubernetes-operator/test/framework/redisbuilder"
 	"github.com/stretchr/testify/require"
 )
@@ -47,23 +49,75 @@ func TestE2E_Maintain_RebalanceBeforeAddReplicas(t *testing.T) {
 	s.RequireReplicasPointToPrimaries(t, clusterName, topologySettleTimeout)
 }
 
-// TestE2E_Maintain_ZombieCleanupAndPersist force-deletes a replica, leaving its
-// node ID in gossip, and asserts maintain forgets the zombie node ID and the
-// cluster re-converges.
+// TestE2E_Maintain_RecreatedPodKeepsNodeID force-deletes a replica and asserts
+// no peer ever forgets its node ID: the pod comes back with the same nodes.conf,
+// so its old ID is not a zombie even while the new pod is not Running yet.
+func TestE2E_Maintain_RecreatedPodKeepsNodeID(t *testing.T) {
+	s := newCluster(t, redisbuilder.WithReplicas(1))
+
+	victim := s.PickReplicaPod(t, clusterName, topologySettleTimeout)
+	nodeID := s.RedisNodeIDForPod(t, victim)
+	oldUID := s.PodUID(t, victim)
+	require.NotEmpty(t, oldUID)
+
+	s.ForceDeleteRedisPod(t, victim)
+	var forgottenBy []string
+	s.EventuallyErrorT(t, "peers list the recreated pod's node ID at its new IP", failoverTimeout, func() error {
+		views, err := s.TryClusterViews(clusterName)
+		if err != nil {
+			return err
+		}
+		newIP := ""
+		if uid := s.PodUID(t, victim); uid != "" && uid != oldUID {
+			newIP = s.PodIP(t, victim)
+		}
+		for _, view := range views {
+			if view.ViewerPod == victim {
+				continue
+			}
+			node, ok := rckind.FindNodeByID(view.Nodes, nodeID)
+			if !ok {
+				forgottenBy = append(forgottenBy, view.ViewerPod)
+				return nil
+			}
+			if newIP == "" || node.IP != newIP {
+				return fmt.Errorf("%s lists node %s at %q, want new pod IP %q", view.ViewerPod, nodeID, node.IP, newIP)
+			}
+		}
+		return nil
+	})
+	require.Empty(t, forgottenBy, "peers forgot node %s of recreated pod %s", nodeID, victim)
+	require.Equal(t, nodeID, s.RedisNodeIDForPod(t, victim), "recreated pod did not keep its node ID")
+
+	s.TriggerReconcile(t, clusterName, scaleConvergeTimeout)
+	require.NoError(t, s.WaitReady(clusterObjectKey(s), failoverTimeout))
+	s.RequireSlotCoverage(t, clusterName, topologySettleTimeout)
+	s.RequireReplicasPointToPrimaries(t, clusterName, topologySettleTimeout)
+}
+
+// TestE2E_Maintain_ZombieCleanupAndPersist gives a replica a new node ID
+// (CLUSTER RESET HARD rewrites nodes.conf) and force-deletes it, so peers keep
+// its old ID at an address no pod owns. It asserts maintain forgets that zombie,
+// the reset node rejoins, and the zombie stays forgotten.
 func TestE2E_Maintain_ZombieCleanupAndPersist(t *testing.T) {
 	s := newCluster(t, redisbuilder.WithReplicas(1))
 
 	victim := s.PickReplicaPod(t, clusterName, topologySettleTimeout)
 	oldNodeID := s.RedisNodeIDForPod(t, victim)
+	oldUID := s.PodUID(t, victim)
+	require.NotEmpty(t, oldUID)
 
+	require.Equal(t, "OK", strings.TrimSpace(s.RedisCommandAtIP(t, s.PodIP(t, victim), "CLUSTER", "RESET", "HARD")))
 	s.ForceDeleteRedisPod(t, victim)
-	require.NoError(t, s.WaitReady(clusterObjectKey(s), failoverTimeout))
+	s.WaitPodRecreated(t, victim, oldUID, failoverTimeout)
+	require.NotEqual(t, oldNodeID, s.RedisNodeIDForPod(t, victim), "reset pod kept its old node ID")
 	s.TriggerReconcile(t, clusterName, scaleConvergeTimeout)
 
-	s.EventuallyT(t, "old Redis node ID forgotten", failoverTimeout, func() bool {
-		out, err := s.TryClusterNodes()
-		return err == nil && !strings.Contains(out, oldNodeID)
+	s.EventuallyErrorT(t, "old Redis node ID forgotten", failoverTimeout, func() error {
+		return requireNodeAbsentInPeerViews(s, oldNodeID, "")
 	})
+	require.NoError(t, s.WaitReady(clusterObjectKey(s), failoverTimeout))
 	s.RequireSlotCoverage(t, clusterName, topologySettleTimeout)
 	s.RequireReplicasPointToPrimaries(t, clusterName, topologySettleTimeout)
+	require.NoError(t, requireNodeAbsentInPeerViews(s, oldNodeID, ""), "forgotten zombie came back")
 }

@@ -43,6 +43,7 @@ type RedisClustersReconciler struct {
 	BackupBackendFactory     BackupBackendFactory
 	notFoundCache            sync.Map // key: NamespacedName string, value: time.Time
 	primaryEndpointReadiness primaryEndpointReadinessTracker
+	zombieFirstSeen          zombieFirstSeenTracker
 }
 
 // RedisClusterReconciler reconciles one Redis cluster object.
@@ -54,6 +55,7 @@ type RedisClusterReconciler struct {
 	BackupBackendFactory     BackupBackendFactory
 	notFoundCache            *sync.Map
 	primaryEndpointReadiness *primaryEndpointReadinessTracker
+	zombieFirstSeen          *zombieFirstSeenTracker
 	primaryEndpointProber    primaryEndpointProber
 	primaryEndpointNow       func() time.Time
 }
@@ -142,6 +144,7 @@ func (r *RedisClustersReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		BackupBackendFactory:     r.BackupBackendFactory,
 		notFoundCache:            &r.notFoundCache,
 		primaryEndpointReadiness: &r.primaryEndpointReadiness,
+		zombieFirstSeen:          &r.zombieFirstSeen,
 	}
 
 	cc.Log.Info("Begin reconcile")

@@ -56,7 +56,7 @@ func TestE2E_TerminatingReplica(t *testing.T) {
 	beginPodTermination(t, s, victim)
 	s.TriggerReconcile(t, clusterName, scaleConvergeTimeout)
 	s.EventuallyErrorT(t, "terminating replica forgotten", failoverTimeout, func() error {
-		return requireNodeAbsentInEveryView(s, victimID)
+		return requireNodeAbsentInPeerViews(s, victimID, victim)
 	})
 
 	finishPodTermination(t, s, victim)
@@ -159,12 +159,17 @@ func requireNodeNotPrimaryInEveryView(s *rckind.Suite, nodeID string) error {
 	return nil
 }
 
-func requireNodeAbsentInEveryView(s *rckind.Suite, nodeID string) error {
+// requireNodeAbsentInPeerViews checks every Redis view except ownerPod's: a live
+// node always lists itself, and a terminating pod stays Ready until it exits.
+func requireNodeAbsentInPeerViews(s *rckind.Suite, nodeID, ownerPod string) error {
 	views, err := s.TryClusterViews(clusterName)
 	if err != nil {
 		return err
 	}
 	for _, view := range views {
+		if view.ViewerPod == ownerPod {
+			continue
+		}
 		if _, ok := rckind.FindNodeByID(view.Nodes, nodeID); ok {
 			return fmt.Errorf("node %s remains in Redis view %s", nodeID, view.ViewerIP)
 		}
