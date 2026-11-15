@@ -36,10 +36,11 @@ The nightly is the `scheduled-regression` job in `.github/workflows/test.yml`
    | `loadgen` | `E2E_SLOW=1 E2E_BUILD_LOADGEN=1 E2E_TEST_TIMEOUT=85m` |
 
    ```sh
-   E2E_SLOW=1 E2E_TEST_TIMEOUT=85m ci/dev-e2e.sh -run '^TestE2E_NAME$'
+   E2E_SLOW=1 E2E_TEST_TIMEOUT=85m ci/dev-e2e.sh -v -run '^TestE2E_NAME$'
    ```
 
-   Confirm the test actually ran: the output must show `--- PASS` or
+   Keep `-v`: without it `go test` prints no per-test lines. Confirm the test
+   actually ran: the `-v` output must show `--- PASS` or
    `--- FAIL` for it, not `--- SKIP` or `no tests to run`. A skipped test is
    not a reproduction.
 6. Report: run link, lane, test, first error line, new, repeated or unconfirmed (with the SHAs compared), suspected

@@ -46,11 +46,15 @@ case "$args" in
     esac ;;
   *" get deployment "*) echo 'operator|1|1' ;;
   *" get rediscluster "*) echo '1|0||app=cache,' ;;
-  *" toolbox"*)
-    [[ "${MOCK_ACL:-false}" == true ]] && echo toolbox-0 ;;
+  *" get pods "*"--selector app.kubernetes.io/component=toolbox "*)
+    [[ "${MOCK_ACL:-false}" == true ]] && echo toolbox-0
+    exit 0 ;;
   *" get pods "*) echo '|True|cache-0' ;;
   *" get pod "*) echo 10.0.0.1 ;;
-  *" exec "*" test -x "*) [[ "${MOCK_ACL:-false}" == true ]] ;;
+  *" exec "*" toolbox-0 -- test -x "*)
+    [[ "${MOCK_ACL:-false}" == true ]]
+    exit $? ;;
+  *" exec "*" -- test -x "*) exit 1 ;;
   *" exec "*)
     if [[ "${MOCK_ACL:-false}" == true && "$args" != *redis-operator-redis-cli* ]]; then
       echo 'NOAUTH Authentication required.'; exit 0
@@ -123,16 +127,20 @@ check_verify() {
   local label="$1" acl="$2" want_set="$3"
   shift 3
   MOCK_ACL="$acl" run_bounded "$verify" --namespace ns --name cache --timeout 0 --json "$@"
-  local sets helper_calls direct_calls
+  local sets helper_calls direct_calls redis_calls
   sets="$(grep -c ' SET ' "$MOCK_LOG" || true)"
-  helper_calls="$(grep -c -- "-- $AUTH_HELPER " "$MOCK_LOG" || true)"
-  direct_calls="$(grep -c -- '-- redis-cli ' "$MOCK_LOG" || true)"
+  # Exact targets: the toolbox pod with the helper, or the Redis pod's redis container.
+  helper_calls="$(grep -c -- "^exec --namespace ns toolbox-0 -- $AUTH_HELPER -h 10.0.0.1 " "$MOCK_LOG" || true)"
+  direct_calls="$(grep -c -- '^exec --namespace ns cache-0 --container redis -- redis-cli ' "$MOCK_LOG" || true)"
+  redis_calls="$(grep -c -- '^exec .* CLUSTER \|^exec .* GET \|^exec .* SET ' "$MOCK_LOG" || true)"
   if [[ "$rc" != 0 || "$out" != *'"ok":true'* ]]; then
     fail "$label: rc=$rc output: $out"
   elif [[ "$want_set" == true && "$sets" == 0 ]] || [[ "$want_set" == false && "$sets" != 0 ]]; then
     fail "$label: $sets SET calls, want_set=$want_set"
-  elif [[ "$acl" == true && ("$helper_calls" == 0 || "$direct_calls" != 0) ]]; then
-    fail "$label: helper=$helper_calls direct=$direct_calls redis-cli calls on an ACL cluster"
+  elif [[ "$acl" == true && ("$helper_calls" == 0 || "$helper_calls" != "$redis_calls") ]]; then
+    fail "$label: $helper_calls of $redis_calls Redis calls used the toolbox helper on an ACL cluster"
+  elif [[ "$acl" == false && ("$direct_calls" == 0 || "$direct_calls" != "$redis_calls") ]]; then
+    fail "$label: $direct_calls of $redis_calls Redis calls ran redis-cli in the Redis pod"
   else
     pass "$label"
   fi
