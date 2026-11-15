@@ -310,7 +310,10 @@ func classifyBackendFailure(provider backendProvider, operation string, result B
 	case strings.Contains(output, "timeout"), strings.Contains(output, "timed out"), strings.Contains(output, "connection"), strings.Contains(output, "network"), strings.Contains(output, "dns"), strings.Contains(output, "resolve host"),
 		strings.Contains(output, "could not connect to endpoint url"), strings.Contains(output, "name or service not known"), strings.Contains(output, "temporary failure in name resolution"):
 		kind = BackendNetwork
-	case provider == backendS3 && (strings.Contains(output, "nosuchkey") || strings.Contains(output, "specified key does not exist")):
+	// `aws s3 cp` checks the source with HeadObject, which has no error body,
+	// so a missing key surfaces only as "(404) ... HeadObject operation: Not Found".
+	case provider == backendS3 && (strings.Contains(output, "nosuchkey") || strings.Contains(output, "specified key does not exist") ||
+		strings.Contains(output, "(404)")):
 		kind = BackendNotFound
 	case provider == backendGCS && (strings.Contains(output, "matched no objects") || strings.Contains(output, "no urls matched")):
 		kind = BackendNotFound
