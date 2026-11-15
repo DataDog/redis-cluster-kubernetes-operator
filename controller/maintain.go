@@ -942,15 +942,29 @@ func orderReplicasNonDrainingFirst(replicas []*redis_cluster.ClusterNode) []*red
 	return ordered
 }
 
-// podNodesWithoutID returns the pod names of pod-backed nodes whose Redis node ID is not known yet.
-func podNodesWithoutID(cluster *redis_cluster.Cluster) []string {
-	var pods []string
+// podNodesWithoutID splits the pod-backed nodes whose Redis node ID is not known yet
+// into pods created within grace of now (Redis may still be starting) and older
+// pods (Redis is likely stuck, e.g. crash looping or a broken nodes.conf).
+func podNodesWithoutID(cluster *redis_cluster.Cluster, now time.Time, grace time.Duration) (starting, stuck []*redis_cluster.ClusterNode) {
 	for _, n := range cluster.AllNodes {
-		if n.PodIndex >= 0 && n.ID == "" {
-			pods = append(pods, n.PodName)
+		if n == nil || n.PodIndex < 0 || n.ID != "" {
+			continue
+		}
+		if n.PodCreation > 0 && now.Sub(time.Unix(n.PodCreation, 0)) < grace {
+			starting = append(starting, n)
+		} else {
+			stuck = append(stuck, n)
 		}
 	}
-	return pods
+	return starting, stuck
+}
+
+func podNames(nodes []*redis_cluster.ClusterNode) []string {
+	names := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		names = append(names, n.PodName)
+	}
+	return names
 }
 
 // forgetZombies instructs primaries and replicas to forget about zombie nodes, if any, and refreshes the cluster.
@@ -972,13 +986,32 @@ func (r *RedisClusterReconciler) forgetZombies(ctx context.Context, cluster *red
 	// A running pod whose Redis has not reported its node ID yet (e.g. it was just
 	// recreated and Redis is still starting) may be the owner of a "zombie" ID that
 	// peers still list at the pod's previous IP. FORGETting it would evict a live
-	// node, so defer zombie cleanup until every pod-backed node has an ID.
-	if pending := podNodesWithoutID(cluster); len(pending) > 0 {
-		log.Info("Deferring zombie cleanup: some pods have not reported a Redis node ID yet",
+	// node, so defer zombie cleanup while such a pod is new. Once a pod is older than
+	// OperationTimeout its Redis is likely stuck, so stop deferring: otherwise one
+	// broken pod would block zombie cleanup forever.
+	grace := constants.OperationTimeout
+	if cluster.Timeouts != nil {
+		grace = cluster.Timeouts.OperationTimeout
+	}
+	starting, stuck := podNodesWithoutID(cluster, time.Now(), grace)
+	if len(starting) > 0 {
+		log.Info("Deferring zombie cleanup: some new pods have not reported a Redis node ID yet",
 			"zombieIDs", zombieIDs,
-			"podsWithoutID", pending)
-		_ = r.Metrics.CountBadSituation("zombie_forget_deferred_pod_without_id")
+			"podsWithoutID", podNames(starting),
+			"grace", grace)
+		for _, n := range starting {
+			_ = r.Metrics.CountBadSituation("zombie_forget_deferred_pod_without_id", "pod_name:"+n.PodName)
+		}
 		return cluster, nil
+	}
+	if len(stuck) > 0 {
+		log.Info("Proceeding with zombie cleanup: pods without a Redis node ID are past the startup grace period",
+			"zombieIDs", zombieIDs,
+			"podsWithoutID", podNames(stuck),
+			"grace", grace)
+		for _, n := range stuck {
+			_ = r.Metrics.CountBadSituation("zombie_forget_pod_without_id_past_grace", "pod_name:"+n.PodName)
+		}
 	}
 	log.Info("Detected zombie nodes to forget",
 		"zombieCount", zombieCount,

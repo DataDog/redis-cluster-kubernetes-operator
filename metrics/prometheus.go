@@ -50,6 +50,7 @@ var (
 		"restore_slot_ownership_from_manifest", "slot_loss_no_backup_blocking_empty_assign", "slot_reown_from_manifest",
 		"split_topology_detected", "statefulset_not_ready", "take_node_out_promoting_draining_replica",
 		"terminating_primary_failover_failed", "unassigned_slots_no_affected_node", "zombie_persisted_after_forget",
+		"zombie_forget_deferred_pod_without_id", "zombie_forget_pod_without_id_past_grace",
 	)
 	autoscalingResults = stringSet("guard", "repair", "blocked", "drift", "degraded", "accepted")
 	autoscalingReasons = stringSet(
