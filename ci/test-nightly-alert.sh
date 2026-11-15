@@ -101,6 +101,11 @@ run_alert --run-id 1001 >"$TEMP_DIR/out"
 grep -q 'nothing to report' "$TEMP_DIR/out" || fail "guard did not skip a manual run on main"
 [[ ! -s "$CALLS" ]] || fail "guard run made write calls"
 
+# 2c. Synthetic scheduled failure on another branch (fixture run-1002).
+run_alert --run-id 1002 >"$TEMP_DIR/out"
+grep -q 'nothing to report' "$TEMP_DIR/out" || fail "guard did not skip a scheduled run off main"
+[[ ! -s "$CALLS" ]] || fail "guard run made write calls"
+
 # 3. No open issue: create one with the label and body.
 : >"$CALLS"
 run_alert --run-id 43672223271 >/dev/null
