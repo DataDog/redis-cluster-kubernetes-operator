@@ -9,6 +9,7 @@ import (
 	rb "github.com/DataDog/redis-cluster-kubernetes-operator/test/framework/redisbuilder"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // TestNewBase_Defaults pins the shared CR core: topology, container, STS replica count.
@@ -68,4 +69,19 @@ func TestSetters(t *testing.T) {
 
 	rb.AppendToolboxACL(rc, "s3cr3t")
 	assert.Contains(t, rc.Spec.StatefulsetTemplate.Spec.Template.Spec.Containers[0].Args, "toolbox")
+}
+
+// TestAppendClientTLS keeps the operator's plaintext path and adds a TLS client listener.
+func TestAppendClientTLS(t *testing.T) {
+	rc := rb.NewBase("foo", "default", rb.DefaultRedisImage)
+	rb.AppendClientTLS(rc, "foo-tls")
+
+	podSpec := rc.Spec.StatefulsetTemplate.Spec.Template.Spec
+	require.Len(t, podSpec.Volumes, 1)
+	assert.Equal(t, "foo-tls", podSpec.Volumes[0].Secret.SecretName)
+	c := podSpec.Containers[0]
+	assert.Contains(t, c.VolumeMounts, corev1.VolumeMount{Name: rb.TLSVolumeName, MountPath: rb.TLSMountPath, ReadOnly: true})
+	assert.Subset(t, c.Args, []string{"--tls-port", "6380", "--tls-cluster", "no", "--tls-replication", "no"})
+	assert.Contains(t, c.Args, "--port", "plaintext port stays for the operator")
+	assert.Len(t, c.Ports, 3)
 }

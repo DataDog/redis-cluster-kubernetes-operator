@@ -218,6 +218,7 @@ portability.
 - [Local quick start](docs/getting-started.md)
 - [Redis workload contract](docs/workload-contract.md)
 - [Operations guide](docs/operations.md)
+- [Client TLS](docs/tls.md)
 - [RedisCluster API reference](docs/api-reference.md)
 - [Example workload](examples/README.md)
 - [Deployed-operator clean-room tests](test/blackbox/README.md)
