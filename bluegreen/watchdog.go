@@ -90,10 +90,22 @@ func (h *Handler) checkProgressWatchdog(ctx context.Context, cluster *redis_clus
 		"reason", dec.Reason, "pendingRejoin", assessment.PendingRejoin, "unsafeSlots", dec.UnsafeSlots)
 
 	if dec.Action == ActFinishForward {
-		// Green owns all data; ScalingDownBlue still gates blue deletion.
+		target, skip := watchdogFinishForwardTarget(phase)
+		if !skip {
+			// Green owns all slots, but this phase is still waiting on its own
+			// gate (topology convergence, DNS switch, or green replicas being
+			// attached and fully synced). Jumping ahead would delete blue while
+			// it may hold the only fully synced copies. Page and let the phase
+			// keep running.
+			_ = h.metrics.CountBadSituation("bluegreen_watchdog_hold_gated", fmt.Sprintf("phase:%s", phase))
+			bgStatus.Message = fmt.Sprintf("Watchdog: %s stalled %s — green owns all shards but the phase gate has not passed (paged, phase continues)",
+				phase, stall.Truncate(time.Second))
+			_ = h.deps.UpdateStatus(ctx, cluster.RedisCluster)
+			return ctrl.Result{}, health.Warn, false, nil
+		}
 		_ = h.metrics.CountBadSituation("bluegreen_watchdog_finish_forward", fmt.Sprintf("phase:%s", phase))
-		setPhase(bgStatus, cachev1.BlueGreenPhaseScalingDownBlue,
-			"Watchdog: green owns all shards, finishing forward (blue delete gated by coverage floor)")
+		setPhase(bgStatus, target,
+			fmt.Sprintf("Watchdog: green owns all shards, finishing forward via %s", target))
 		_ = h.deps.UpdateStatus(ctx, cluster.RedisCluster)
 		return ctrl.Result{RequeueAfter: time.Second}, health.Warn, true, nil
 	}
@@ -104,4 +116,24 @@ func (h *Handler) checkProgressWatchdog(ctx context.Context, cluster *redis_clus
 		phase, stall.Truncate(time.Second), dec.Reason)
 	_ = h.deps.UpdateStatus(ctx, cluster.RedisCluster)
 	return ctrl.Result{RequeueAfter: constants.DefaultSleepTime}, health.Warn, true, nil
+}
+
+// watchdogFinishForwardTarget returns the phase a stalled rollout may jump to
+// once green owns every slot, and false when the stalled phase must keep
+// running because skipping it would bypass a safety gate.
+func watchdogFinishForwardTarget(phase cachev1.BlueGreenPhase) (cachev1.BlueGreenPhase, bool) {
+	switch phase {
+	case cachev1.BlueGreenPhasePromoting,
+		cachev1.BlueGreenPhaseSwitchingDNS,
+		cachev1.BlueGreenPhaseFormingCluster:
+		// Promoting gates on topology convergence, SwitchingDNS on green
+		// serving, FormingCluster on green replicas being attached and synced.
+		return "", false
+	case cachev1.BlueGreenPhaseScalingDownBlue, cachev1.BlueGreenPhaseTearingDown:
+		return cachev1.BlueGreenPhaseScalingDownBlue, true
+	default:
+		// Earlier phases: Promoting sees every shard promoted and advances
+		// through the remaining gates.
+		return cachev1.BlueGreenPhasePromoting, true
+	}
 }
