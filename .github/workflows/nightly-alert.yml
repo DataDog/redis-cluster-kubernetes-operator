@@ -1,0 +1,63 @@
+name: Nightly failure alert
+
+on:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Test workflow run ID to report
+        required: true
+        type: string
+      dry_run:
+        description: Print the issue instead of writing it
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'schedule' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      # Default ref: the workflow's own revision on main, never the head of the
+      # triggering run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Open or update the ci-flake issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=(--repo "$REPO")
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            args+=(--run-id "$INPUT_RUN_ID" --force)
+            if [[ "$INPUT_DRY_RUN" == true ]]; then
+              args+=(--dry-run)
+            fi
+          else
+            args+=(--run-id "$WORKFLOW_RUN_ID")
+          fi
+          ci/nightly-alert.sh "${args[@]}"

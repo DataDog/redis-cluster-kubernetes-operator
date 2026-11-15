@@ -1,0 +1,11 @@
+{
+  "id": 43672223271,
+  "name": "Test",
+  "event": "schedule",
+  "head_branch": "main",
+  "head_sha": "f28eaaf6ba06c0f3778a4fd9f7cfad48cfc7d4b8",
+  "conclusion": "failure",
+  "run_number": 130,
+  "run_attempt": 1,
+  "run_started_at": "2026-11-15T03:24:32Z"
+}

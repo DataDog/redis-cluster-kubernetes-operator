@@ -1,0 +1,11 @@
+{
+  "id": 1001,
+  "name": "Test",
+  "event": "workflow_dispatch",
+  "head_branch": "main",
+  "head_sha": "0000000000000000000000000000000000000000",
+  "conclusion": "failure",
+  "run_number": 1,
+  "run_attempt": 1,
+  "run_started_at": "2026-11-15T00:00:00Z"
+}

@@ -1,0 +1,44 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 132684571968,
+      "name": "In-process reconciler regression (bg-stuck)",
+      "conclusion": "success",
+      "html_url": "https://github.com/DataDog/redis-cluster-kubernetes-operator/actions/runs/43672223271/job/132684571968",
+      "steps": [
+        {
+          "name": "Run diagnostic regression lane",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 132684572175,
+      "name": "In-process reconciler regression (loadgen)",
+      "conclusion": "failure",
+      "html_url": "https://github.com/DataDog/redis-cluster-kubernetes-operator/actions/runs/43672223271/job/132684572175",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run diagnostic regression lane",
+          "conclusion": "failure"
+        },
+        {
+          "name": "Upload diagnostics",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 132684572963,
+      "name": "unit",
+      "conclusion": "skipped",
+      "html_url": "https://github.com/DataDog/redis-cluster-kubernetes-operator/actions/runs/43672223271/job/132684572963",
+      "steps": []
+    }
+  ]
+}

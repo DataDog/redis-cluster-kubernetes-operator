@@ -1,0 +1,11 @@
+{
+  "id": 43753044412,
+  "name": "Test",
+  "event": "workflow_dispatch",
+  "head_branch": "khrystyna.terletska/zombie-forget-starting-pod",
+  "head_sha": "ed001d9ffed40452f1e261d02138f71bf48cc9d5",
+  "conclusion": "failure",
+  "run_number": 142,
+  "run_attempt": 1,
+  "run_started_at": "2026-11-15T19:33:01Z"
+}

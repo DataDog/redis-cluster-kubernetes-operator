@@ -1,0 +1,9 @@
+2026-11-15T03:30:00.0000000Z ##[group]Run ci/run-e2e-lane.sh loadgen
+2026-11-15T03:30:01.0000000Z === RUN   TestE2E_PrimaryKill_DataAndTopology
+2026-11-15T03:30:02.0000000Z     suite.go:120: ghp_FAKEtoken0123456789abcdefSECRET leaked-looking line
+2026-11-15T03:43:31.0000000Z     --- FAIL: TestE2E_PrimaryKill_DataAndTopology/seed_and_verify (61.02s)
+2026-11-15T03:43:32.0000000Z --- FAIL: TestE2E_PrimaryKill_DataAndTopology (812.34s)
+2026-11-15T03:43:32.0000000Z --- FAIL: TestE2E_PrimaryKill_DataAndTopology (812.34s)
+2026-11-15T03:43:33.0000000Z --- FAIL: `$(touch /tmp/pwned)`
+2026-11-15T03:43:33.0000000Z FAIL	github.com/DataDog/redis-cluster-kubernetes-operator/e2e	812.400s
+2026-11-15T03:43:34.0000000Z ##[error]Process completed with exit code 1.
