@@ -25,15 +25,24 @@ loadgen, 1,000 requests/s (70% GET, 25% SET, 5% MGET), latency measured from
 each request's scheduled send time. Cluster: 3 primaries with 1 replica each,
 20,000 seed keys, Redis 8.6.0, KIND (Kubernetes 1.33) on a 4-CPU Docker VM.
 
+Five runs per scenario. Unavailable and error rate are median / worst; p99 is
+the median run; max latency is the worst run.
+
 | Scenario | Unavailable | Error rate | p99 baseline → fault | Max latency | Acked writes lost |
 | --- | --- | --- | --- | --- | --- |
-| No fault | 0 s | 0% | 1.6 → 1.8 ms | 4 ms | 0 |
-| Primary pod deleted | 1 s | 0.16% | 1.6 → 292 ms | 338 ms | 0 |
-| Scale-up 3 → 6 primaries | 0 s | 0% | 1.4 → 90 ms | 102 ms | 0 |
-| Primary deleted during scale-up 3 → 6 | ~6 s stall | 0.23% | 1.4 → 5,595 ms | 5.6 s | **410** |
+| No fault | 0 s / 0 s | 0% / 0% | 1.4 → 2.1 ms | 12 ms | 0 |
+| Primary pod deleted | 2 s / 2 s | 0.32% / 0.57% | 1.4 → 5,346 ms | 5.6 s | 0 |
+| Scale-up 3 → 6 primaries | 0 s / 0 s | 0% / 0% | 1.4 → 157 ms | 184 ms | 0 |
+| Primary deleted during scale-up 3 → 6 | 13 s / 18 s | 0.16% / 0.17% | 1.4 → 5,810 ms | 6.0 s | 0 |
 
-Status: one validation run per scenario on `f28eaaf`. Five runs per scenario,
-with median and worst, replace this table before it is quoted.
+The multi-second p99 after a primary delete is the client, not Redis: requests
+already routed to the deleted pod's old IP wait out the client's dial timeout
+(`dial tcp … i/o timeout`; 5 s by default in rueidis) before following the new
+slot owner. A shorter client dial timeout shortens it.
+
+Runs on the operator with [#40](https://github.com/DataDog/redis-cluster-kubernetes-operator/pull/40);
+without it, a primary deleted during scale-up lost 372–441 acknowledged writes
+per run.
 
 Definitions:
 
@@ -43,17 +52,14 @@ Definitions:
 
 ## Known limitations
 
-- **Termination during a scale-up rebalance can lose acknowledged writes.** The
+- **Termination during a scale-up rebalance gets no planned failover.** The
   rebalance after a scale-up is one blocking call
   ([`controller/maintain.go`](../controller/maintain.go)), so a primary that
-  terminates while it runs gets no planned failover. The pod restarts in about
-  3 s, faster than `cluster-node-timeout`, so no replica is promoted; with the
-  same node ID (from `nodes.conf` on its PVC) it rejoins as the primary of its
-  slots and acknowledges writes. About 4 s later a replica takes over and the
-  restarted node resyncs from it, discarding the writes the replica never got.
-  Two runs lost 410 of 35,514 and 441 acknowledged writes. A primary delete
-  without a rebalance lost none. Which component promotes the replica is not
-  yet confirmed: KIND runs do not capture operator logs.
+  terminates while it runs is not failed over first. The pod restarts with the
+  same node ID (from `nodes.conf` on its PVC) and rejoins as the primary of its
+  slots. Clients see errors spread over 13–18 s instead of 2 s. Acknowledged
+  writes are kept since #40: before it, the operator mistook the restarted
+  primary for a zombie and forced its replica over, discarding them.
 - **No PodDisruptionBudget.** The operator does not create one. Add one with
   `maxUnavailable: 1` so a node drain cannot take a primary and its replica at
   the same time.
