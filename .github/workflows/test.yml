@@ -50,7 +50,9 @@ jobs:
       - name: Lint and validate chart values
         run: |
           helm lint . --strict --kube-version 1.33.0
-          helm template gizmo-compatibility . --kube-version 1.36.0 >/dev/null
+          for version in 1.33.0 1.34.0 1.35.0 1.36.0; do
+            helm template "compat-$version" . --kube-version "$version" >/dev/null
+          done
           helm lint . --strict --kube-version 1.33.0 \
             --set operator.redisAuth.secretName=redis-auth \
             --set operator.replicaCount=2 \
