@@ -73,7 +73,7 @@ Scheduled run #130 of the Test workflow failed on `main`.
 
 Failing jobs:
 
-- [In-process reconciler regression (loadgen)](https://github.com/DataDog/redis-cluster-kubernetes-operator/actions/runs/43672223271/job/132684572175), step `Run diagnostic regression lane`: `TestFoo`, `TestE2E_PrimaryKill_DataAndTopology`
+- [In-process reconciler regression (loadgen)](https://github.com/DataDog/redis-cluster-kubernetes-operator/actions/runs/43672223271/job/132684572175), step `Run diagnostic regression lane`: `TestFoo`, `TestAutoscalingAcceptsExactlyOnePrimaryBeforeStatefulSetMutation`, `TestE2E_PrimaryKill_DataAndTopology`
 EOF
 }
 
@@ -83,7 +83,7 @@ assert_no_log_text() {
   # (ghp_/gho_/AKIA/xox), a name without a Test prefix, missing, malformed, or
   # trailing duration suffixes, an overlong name, subtest segments, and
   # top-level names carrying credential-looking patterns.
-  ! grep -Eq 'ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|AKIA|xox|SECRET|seed_and_verify|TestLeak|Deadbeef|pwned|touch|##\[|812\.34s|suite\.go|EmbeddedMidLine|helperNotATest|MissingDuration|MalformedDuration|TrailingText|TestOverlong' "$file" \
+  ! grep -Eq 'ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|AKIA|xox|SECRET|seed_and_verify|ASIA|TestLeak|Deadbeef|pwned|touch|##\[|812\.34s|suite\.go|EmbeddedMidLine|helperNotATest|MissingDuration|MalformedDuration|TrailingText|TestOverlong' "$file" \
     || fail "log text leaked into $file"
 }
 
@@ -129,5 +129,14 @@ FAKE_ISSUES="$TEMP_DIR/issues.json" run_alert --run-id 43672223271 >/dev/null
 grep -q "^issue comment 12 --repo $REPO" "$CALLS" || fail "did not comment on #12: $(cat "$CALLS")"
 ! grep -q '^issue create' "$CALLS" || fail "created a duplicate issue"
 assert_no_log_text "$CALLS"
+
+# 5. Every real top-level Test/Fuzz name in this repo passes the name filter.
+git -C "$REPO_ROOT" grep -hoE '^func (Test|Fuzz)[A-Za-z0-9_]*' -- '*_test.go' \
+  | sed 's/^func //' | sort -u >"$TEMP_DIR/repo-names"
+[[ -s "$TEMP_DIR/repo-names" ]] || fail "no test names found in the repo"
+"$REPO_ROOT/ci/nightly-alert.sh" --check-names <"$TEMP_DIR/repo-names" >"$TEMP_DIR/dropped"
+if [[ -s "$TEMP_DIR/dropped" ]]; then
+  fail "$(wc -l <"$TEMP_DIR/dropped" | tr -d ' ') of $(wc -l <"$TEMP_DIR/repo-names" | tr -d ' ') repo test names rejected, e.g. $(head -n 3 "$TEMP_DIR/dropped" | paste -sd' ' -)"
+fi
 
 echo "nightly-alert tests passed"

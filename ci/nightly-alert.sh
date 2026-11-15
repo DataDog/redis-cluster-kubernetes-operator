@@ -8,6 +8,7 @@
 # to find test names and deleted right away; log text is never printed.
 #
 # Usage: ci/nightly-alert.sh --repo OWNER/NAME --run-id ID [--dry-run] [--force]
+#        ci/nightly-alert.sh --check-names < names.txt
 #   --dry-run  print the issue title/body (or comment target); make no writes
 #   --force    skip the "scheduled failure on main" guard (manual dispatch)
 # Requires gh, curl, and jq; GH_TOKEN must be set in the environment.
@@ -17,6 +18,31 @@ set -euo pipefail
 readonly TITLE='Nightly Test workflow failing on main'
 readonly LABEL='ci-flake'
 readonly MAX_TESTS_PER_JOB=10
+
+# A top-level Go test name. Subtest segments are never published: they are
+# often built from runtime data.
+readonly TEST_NAME_RE='^(Test|Fuzz|Example|Benchmark)[A-Za-z0-9_]*$'
+# Credential-looking substrings; any name containing one is dropped: GitHub
+# tokens (gh[pousr]_, github_pat_), AWS key IDs (AKIA, ASIA), Slack tokens,
+# GitLab tokens, and long hex runs. Generic base64-like runs are deliberately
+# not matched: long CamelCase Go test names would trip them.
+readonly SECRET_RE='gh[pousr]_|github_pat_|AKIA|ASIA|xox[abprs]-|glpat-|[0-9A-Fa-f]{32,}'
+readonly MAX_TEST_NAME_LEN=200
+readonly MARKER_TIMED_OUT='(test binary timed out)'
+readonly MARKER_NOT_FOUND='(no test name found; see job log)'
+
+valid_test_name() {
+  [[ ${#1} -le $MAX_TEST_NAME_LEN && "$1" =~ $TEST_NAME_RE && ! "$1" =~ $SECRET_RE ]]
+}
+
+# --check-names: print every stdin name that valid_test_name rejects, then
+# exit. Used by ci/test-nightly-alert.sh to check real test names.
+if [[ "${1:-}" == --check-names ]]; then
+  while IFS= read -r name; do
+    valid_test_name "$name" || echo "$name"
+  done
+  exit 0
+fi
 
 repo=''
 run_id=''
@@ -43,19 +69,6 @@ done
 
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/nightly-alert.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
-
-# A top-level Go test name. Subtest segments are never published: they are
-# often built from runtime data.
-readonly TEST_NAME_RE='^(Test|Fuzz|Example|Benchmark)[A-Za-z0-9_]*$'
-# Credential-looking substrings; any name containing one is dropped.
-readonly SECRET_RE='ghp_|gho_|ghs_|ghu_|github_pat_|AKIA|xox[abprs]-|glpat-|[A-Za-z0-9+/=]{32,}|[0-9A-Fa-f]{32,}'
-readonly MAX_TEST_NAME_LEN=200
-readonly MARKER_TIMED_OUT='(test binary timed out)'
-readonly MARKER_NOT_FOUND='(no test name found; see job log)'
-
-valid_test_name() {
-  [[ ${#1} -le $MAX_TEST_NAME_LEN && "$1" =~ $TEST_NAME_RE && ! "$1" =~ $SECRET_RE ]]
-}
 
 # extract_tests LOG_FILE: print up to MAX_TESTS_PER_JOB unique failing test
 # names, or a fixed marker when none can be found. Only complete Go failure
