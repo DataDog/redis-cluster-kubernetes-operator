@@ -37,10 +37,11 @@ jobs:
       actions: read
       issues: write
     steps:
-      # Default ref: the workflow's own revision on main, never the head of the
-      # triggering run.
+      # Always run main's alert script: never the head of the triggering run,
+      # and never the branch a manual dispatch was started from.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: main
           persist-credentials: false
       - name: Open or update the ci-flake issue
         env:
