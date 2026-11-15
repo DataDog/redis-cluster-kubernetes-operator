@@ -1,5 +1,7 @@
 # redis-cluster-kubernetes-operator
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/DataDog/redis-cluster-kubernetes-operator/badge)](https://scorecard.dev/viewer/?uri=github.com/DataDog/redis-cluster-kubernetes-operator)
+
 A Kubernetes operator for coordinating the lifecycle and topology of Redis Cluster on Kubernetes.
 
 The Redis operators we evaluated did not provide the same combination of Kubernetes lifecycle coordination, Redis Cluster topology management, and failure recovery capabilities.
