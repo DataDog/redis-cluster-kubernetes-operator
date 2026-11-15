@@ -890,6 +890,15 @@ func (r *RedisClusterReconciler) failoverReplicas(ctx context.Context, cluster *
 	orderedReplicas := orderReplicasNonDrainingFirst(cluster.Nodes[redis_cluster.ReplicaNode])
 	for _, replicaNode := range orderedReplicas {
 		primaryNode, found := cluster.LookupNodeByID(replicaNode.PrimaryID)
+		if found && !primaryNode.RoleIs(redis_cluster.PrimaryNode) && redisReportsPrimaryHealthy(primaryNode) {
+			// No matching pod, but Redis still serves it as a primary: usually a
+			// pod recreated at a new IP before the pod list caught up. A forced
+			// failover would discard the writes it acknowledged.
+			log.Info("Skipping failover: Redis reports the primary healthy",
+				"primaryID", replicaNode.PrimaryID, "primaryRole", primaryNode.Role, "replicaID", replicaNode.ID)
+			_ = r.Metrics.CountBadSituation("failover_skipped_primary_healthy_in_redis", "pod_name:"+replicaNode.PodName)
+			continue
+		}
 		if (!found || !primaryNode.RoleIs(redis_cluster.PrimaryNode)) && !utils.ContainsString(failedOverIDs, replicaNode.PrimaryID) {
 
 			if replicaNode.IsDrainCandidate() {
@@ -923,6 +932,31 @@ func (r *RedisClusterReconciler) failoverReplicas(ctx context.Context, cluster *
 		}
 	}
 	return cluster, len(failedOverIDs) > 0, nil
+}
+
+// redisReportsPrimaryHealthy reports whether every peer view shows the node as
+// a connected primary with no failure or handshake flags.
+func redisReportsPrimaryHealthy(node *redis_cluster.ClusterNode) bool {
+	healthy := func(flags []string, linkState string) bool {
+		if !utils.ContainsString(flags, "master") || linkState != "connected" {
+			return false
+		}
+		for _, flag := range []string{"fail", "fail?", "handshake", "noaddr"} {
+			if utils.ContainsString(flags, flag) {
+				return false
+			}
+		}
+		return true
+	}
+	if len(node.Views) == 0 {
+		return healthy(node.Flags, node.LinkState)
+	}
+	for _, view := range node.Views {
+		if view == nil || !healthy(view.Flags, view.LinkState) {
+			return false
+		}
+	}
+	return true
 }
 
 // orderReplicasNonDrainingFirst returns a stable ordering with non-draining
