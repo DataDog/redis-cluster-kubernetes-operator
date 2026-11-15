@@ -768,6 +768,8 @@ func manifestSlotCoverage(manifest *BackupManifest) (map[int]string, error) {
 // (false,nil) if definitively absent, (false,err) if existence is unknown. Callers
 // must treat the error case as "unknown", never "absent": empty-assigning over a
 // live backup loses data.
+//
+//nolint:unused // dead code kept for now; removal is a separate cleanup
 func (r *RedisClusterReconciler) backupExists(cluster *redis_cluster.Cluster, path string) (bool, error) {
 	if len(cluster.AllNodes) == 0 {
 		return false, fmt.Errorf("no nodes available to probe backup existence at %s", path)
@@ -807,6 +809,7 @@ func (r *RedisClusterReconciler) backupExists(cluster *redis_cluster.Cluster, pa
 	return false, nil
 }
 
+//nolint:unused // dead code kept for now; removal is a separate cleanup
 func (r *RedisClusterReconciler) latestBackupExists(cluster *redis_cluster.Cluster) (bool, error) {
 	return r.backupExists(cluster, r.latestBackupPath(cluster))
 }

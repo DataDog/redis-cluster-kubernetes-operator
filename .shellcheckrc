@@ -1,0 +1,13 @@
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+#
+# This product includes software developed at Datadog
+# (https://www.datadoghq.com/) Copyright 2026-Present Datadog, Inc.
+
+# Resolve `source "$dir/common.sh"` relative to the script being checked.
+source-path=SCRIPTDIR
+external-sources=true
+
+# Repo-wide idiom: `readonly x="$(...)"` at the top of scripts. Splitting every
+# declaration has no correctness benefit for these call sites.
+disable=SC2155

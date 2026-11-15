@@ -301,6 +301,7 @@ func (h *harness) redisInPod(ctx context.Context, pod corev1.Pod, args ...string
 	return redisResult(h.exec(ctx, pod.Namespace, pod.Name, "redis", command))
 }
 
+//nolint:unused // dead code kept for now; removal is a separate cleanup
 func (h *harness) redisViaService(ctx context.Context, s scenario, args ...string) (string, error) {
 	host := fmt.Sprintf("%s.%s.svc.cluster.local", s.Name, s.Namespace)
 	command := append([]string{"-h", host, "-p", "6379", "--raw"}, args...)

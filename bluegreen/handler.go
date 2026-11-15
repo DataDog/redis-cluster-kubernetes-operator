@@ -727,7 +727,7 @@ func (h *Handler) bgWaitForSync(ctx context.Context, cluster *redis_cluster.Clus
 					"greenPodIP", mapping.GreenPodIP,
 					"bluePrimaryIP", mapping.BluePrimaryIP,
 					"bluePrimaryID", mapping.BluePrimaryID)
-				cluster.Toolbox.MeetAddress(ctx, mapping.GreenPodIP, mapping.BluePrimaryIP, cluster.RedisPort)
+				_, _, _, _ = cluster.Toolbox.MeetAddress(ctx, mapping.GreenPodIP, mapping.BluePrimaryIP, cluster.RedisPort)
 				if replErr := cluster.Toolbox.ReplicateOnIP(mapping.GreenPodIP, mapping.BluePrimaryID); replErr != nil {
 					h.log.Error(replErr, "Failed to re-replicate green pod",
 						"greenPod", mapping.GreenPodName,
@@ -1950,6 +1950,7 @@ func (h *Handler) deleteOrphanedPods(ctx context.Context, cluster *redis_cluster
 	return deleted
 }
 
+//nolint:unused // dead code kept for now; removal is a separate cleanup
 func (h *Handler) markPodsAsActive(ctx context.Context, pods []corev1.Pod) error {
 	h.log.Info("Marking pods as active", "count", len(pods))
 	for i := range pods {
