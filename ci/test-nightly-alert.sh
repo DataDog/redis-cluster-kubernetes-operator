@@ -73,7 +73,7 @@ Scheduled run #130 of the Test workflow failed on `main`.
 
 Failing jobs:
 
-- [In-process reconciler regression (loadgen)](https://github.com/DataDog/redis-cluster-kubernetes-operator/actions/runs/43672223271/job/132684572175), step `Run diagnostic regression lane`: `TestE2E_PrimaryKill_DataAndTopology/seed_and_verify`, `TestE2E_PrimaryKill_DataAndTopology`
+- [In-process reconciler regression (loadgen)](https://github.com/DataDog/redis-cluster-kubernetes-operator/actions/runs/43672223271/job/132684572175), step `Run diagnostic regression lane`: `TestFoo`, `TestE2E_PrimaryKill_DataAndTopology`
 EOF
 }
 
@@ -81,8 +81,9 @@ assert_no_log_text() {
   local file="$1"
   # Rejected fixture lines: embedded marker mid-line, credential-looking tokens
   # (ghp_/gho_/AKIA/xox), a name without a Test prefix, missing, malformed, or
-  # trailing duration suffixes, and an overlong name.
-  ! grep -Eq 'ghp_|gho_|AKIA|xox|SECRET|pwned|touch|##\[|812\.34s|suite\.go|EmbeddedMidLine|helperNotATest|MissingDuration|MalformedDuration|TrailingText|TestOverlong' "$file" \
+  # trailing duration suffixes, an overlong name, subtest segments, and
+  # top-level names carrying credential-looking patterns.
+  ! grep -Eq 'ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|AKIA|xox|SECRET|seed_and_verify|TestLeak|Deadbeef|pwned|touch|##\[|812\.34s|suite\.go|EmbeddedMidLine|helperNotATest|MissingDuration|MalformedDuration|TrailingText|TestOverlong' "$file" \
     || fail "log text leaked into $file"
 }
 

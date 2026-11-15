@@ -44,24 +44,29 @@ done
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/nightly-alert.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 
-# A Go test name as printed in a failure record: a Test/Fuzz/Example/Benchmark
-# top-level name with optional /subtest segments, capped in length.
-readonly TEST_NAME_RE='^(Test|Fuzz|Example|Benchmark)[A-Za-z0-9_]*(/[A-Za-z0-9_.-]+)*$'
+# A top-level Go test name. Subtest segments are never published: they are
+# often built from runtime data.
+readonly TEST_NAME_RE='^(Test|Fuzz|Example|Benchmark)[A-Za-z0-9_]*$'
+# Credential-looking substrings; any name containing one is dropped.
+readonly SECRET_RE='ghp_|gho_|ghs_|ghu_|github_pat_|AKIA|xox[abprs]-|glpat-|[A-Za-z0-9+/=]{32,}|[0-9A-Fa-f]{32,}'
 readonly MAX_TEST_NAME_LEN=200
 readonly MARKER_TIMED_OUT='(test binary timed out)'
 readonly MARKER_NOT_FOUND='(no test name found; see job log)'
 
 valid_test_name() {
-  [[ ${#1} -le $MAX_TEST_NAME_LEN && "$1" =~ $TEST_NAME_RE ]]
+  [[ ${#1} -le $MAX_TEST_NAME_LEN && "$1" =~ $TEST_NAME_RE && ! "$1" =~ $SECRET_RE ]]
 }
 
 # extract_tests LOG_FILE: print up to MAX_TESTS_PER_JOB unique failing test
 # names, or a fixed marker when none can be found. Only complete Go failure
 # records count: after the Actions timestamp prefix, the line must be optional
 # whitespace, "--- FAIL: ", a test name, and " (<seconds>s)" at end of line.
+# Only the top-level name (before the first "/") is kept, so a parent and its
+# subtests collapse to one entry.
 extract_tests() {
   local log_file="$1" names='' line count=0
   while IFS= read -r line; do
+    line="${line%%/*}"
     valid_test_name "$line" || continue
     [[ $'\n'"$names" == *$'\n'"$line"$'\n'* ]] && continue
     names+="$line"$'\n'
