@@ -33,15 +33,32 @@ const (
 // StartRueidisLoadgen deploys the in-cluster loadgen pod (seeded with the
 // cluster's ready redis pod IPs), waits for it Ready, port-forwards, and returns
 // a connected continuous-QPS generator that runs until the test's Cleanup.
-func (s *Suite) StartRueidisLoadgen(t *testing.T, name string) *loadgen.RueidisGenerator {
+func (s *Suite) StartRueidisLoadgen(t *testing.T, name string, opts ...LoadgenOpt) *loadgen.RueidisGenerator {
 	t.Helper()
-	s.deployLoadgenPod(t, s.redisSeedAddrs(t, name))
+	env := []corev1.EnvVar{{Name: "LOADGEN_INIT_ADDRS", Value: s.redisSeedAddrs(t, name)}}
+	for _, opt := range opts {
+		env = opt(env)
+	}
+	s.deployLoadgenPod(t, env)
 	s.waitLoadgenPodReady(t)
 	return loadgen.StartRueidis(t, loadgen.RueidisConfig{
 		Kubeconfig: s.Cluster.Kubeconfig,
 		Namespace:  s.Namespace,
 		PodName:    loadgenPodName,
 	})
+}
+
+// LoadgenOpt adds loadgen pod environment.
+type LoadgenOpt func([]corev1.EnvVar) []corev1.EnvVar
+
+// WithOpenLoop schedules qps requests per second and records the per-second
+// timeline from each request's scheduled time.
+func WithOpenLoop(qps int) LoadgenOpt {
+	return func(env []corev1.EnvVar) []corev1.EnvVar {
+		return append(env,
+			corev1.EnvVar{Name: "LOADGEN_OPEN_LOOP", Value: "true"},
+			corev1.EnvVar{Name: "LOADGEN_QPS", Value: strconv.Itoa(qps)})
+	}
 }
 
 // redisSeedAddrs is the cluster's ready redis pod IPs as host:port seeds for the
@@ -59,8 +76,8 @@ func (s *Suite) redisSeedAddrs(t *testing.T, name string) string {
 }
 
 // deployLoadgenPod creates the loadgen pod (rueidis workload, HTTP control on
-// :8080) pointed at the given seed addresses.
-func (s *Suite) deployLoadgenPod(t *testing.T, initAddrs string) {
+// :8080) with the given environment, which carries the seed addresses.
+func (s *Suite) deployLoadgenPod(t *testing.T, env []corev1.EnvVar) {
 	t.Helper()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -75,7 +92,7 @@ func (s *Suite) deployLoadgenPod(t *testing.T, initAddrs string) {
 				Image:           resolvedLoadgenImage(),
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Ports:           []corev1.ContainerPort{{ContainerPort: loadgen.LoadgenPodPort}},
-				Env:             []corev1.EnvVar{{Name: "LOADGEN_INIT_ADDRS", Value: initAddrs}},
+				Env:             env,
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
 						HTTPGet: &corev1.HTTPGetAction{

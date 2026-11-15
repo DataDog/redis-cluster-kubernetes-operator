@@ -18,6 +18,7 @@ import (
 type testGates struct {
 	slow    bool
 	loadgen bool
+	measure bool
 }
 
 // TestCILaneManifestShape ensures the shell runner exposes only the public
@@ -25,8 +26,8 @@ type testGates struct {
 func TestCILaneManifestMatchesE2EManifest(t *testing.T) {
 	dir := e2eSourceDir(t)
 	ciLanes := readCILanes(t, filepath.Join(dir, "..", "ci", "e2e-lanes.txt"))
-	expected := map[string]bool{"smoke": true, "default": true, "slow": true, "bg-stuck": true, "loadgen": true}
-	for _, lane := range []string{"smoke", "default", "slow", "bg-stuck", "loadgen"} {
+	expected := map[string]bool{"smoke": true, "default": true, "slow": true, "bg-stuck": true, "loadgen": true, "measure": true}
+	for _, lane := range []string{"smoke", "default", "slow", "bg-stuck", "loadgen", "measure"} {
 		if _, ok := ciLanes[lane]; !ok {
 			t.Errorf("required CI lane %q is missing", lane)
 		}
@@ -44,8 +45,8 @@ func TestCILaneManifestMatchesE2EManifest(t *testing.T) {
 			t.Errorf("smoke test %s is not in the default lane", name)
 		}
 	}
-	if len(ciLanes) != 5 {
-		t.Errorf("CI manifest has %d lanes, want 5", len(ciLanes))
+	if len(ciLanes) != len(expected) {
+		t.Errorf("CI manifest has %d lanes, want %d", len(ciLanes), len(expected))
 	}
 	for lane := range ciLanes {
 		if !expected[lane] {
@@ -122,15 +123,19 @@ func TestLaneManifestOwnsEveryE2ETest(t *testing.T) {
 			owner[name] = lane
 			switch lane {
 			case "default":
-				if gate.slow || gate.loadgen {
+				if gate.slow || gate.loadgen || gate.measure {
 					t.Errorf("default lane test %s must not use an opt-in gate", name)
 				}
 			case "loadgen":
-				if !gate.loadgen {
-					t.Errorf("loadgen lane test %s must call requireLoadgen", name)
+				if !gate.loadgen || gate.measure {
+					t.Errorf("loadgen lane test %s must call requireLoadgen and not requireMeasure", name)
+				}
+			case "measure":
+				if !gate.loadgen || !gate.measure {
+					t.Errorf("measure lane test %s must call requireLoadgen and requireMeasure", name)
 				}
 			default:
-				if !gate.slow || gate.loadgen {
+				if !gate.slow || gate.loadgen || gate.measure {
 					t.Errorf("%s lane test %s must call requireSlow and not requireLoadgen", lane, name)
 				}
 			}
@@ -187,6 +192,8 @@ func sourceTestGates(t *testing.T, dir string) map[string]testGates {
 					gate.slow = true
 				case "requireLoadgen":
 					gate.loadgen = true
+				case "requireMeasure":
+					gate.measure = true
 				}
 				return true
 			})

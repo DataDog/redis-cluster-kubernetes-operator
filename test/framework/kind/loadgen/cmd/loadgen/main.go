@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,7 +37,7 @@ func main() {
 	addrs := flag.String("addrs", os.Getenv("LOADGEN_INIT_ADDRS"),
 		"comma-separated Redis cluster seed addresses (host:port,host:port)")
 	listen := flag.String("listen", ":8080", "HTTP control-surface listen address")
-	startQPS := flag.Int("qps", 200, "target QPS across all workers")
+	startQPS := flag.Int("qps", envInt("LOADGEN_QPS", 200), "target QPS across all workers")
 	startWorkers := flag.Int("workers", 2, "worker count")
 	keyPrefix := flag.String("key-prefix", "loadgen", "key prefix for all SET/GET ops")
 	password := flag.String("password", os.Getenv("LOADGEN_PASSWORD"),
@@ -44,6 +45,9 @@ func main() {
 	shardsRefreshInterval := flag.Duration("shards-refresh-interval",
 		envDuration("LOADGEN_SHARDS_REFRESH_INTERVAL", defaultShardsRefreshInterval),
 		"rueidis cluster topology refresh interval")
+	openLoop := flag.Bool("open-loop", os.Getenv("LOADGEN_OPEN_LOOP") == "true",
+		"schedule requests at a fixed rate and record per-second latency from the scheduled time")
+	inflight := flag.Int("inflight", defaultInflight, "open-loop concurrent request limit")
 	flag.Parse()
 
 	if *addrs == "" {
@@ -77,17 +81,32 @@ func main() {
 		qps:       int64(*startQPS),
 		workers:   int64(*startWorkers),
 		written:   make(map[string]string, 4096),
+		timeline:  newTimeline(),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// /pause ends the load but keeps the control surface up for /verify.
+	loadCtx, pauseLoad := context.WithCancel(ctx)
+	defer pauseLoad()
 	stopCh := make(chan struct{})
-	go g.run(ctx, stopCh)
+	if *openLoop {
+		go g.runOpenLoop(loadCtx, stopCh, *inflight)
+	} else {
+		go g.run(loadCtx, stopCh)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/stats", g.handleStats)
+	mux.HandleFunc("/timeline", g.handleTimeline)
+	mux.HandleFunc("/verify", g.handleVerify)
+	mux.HandleFunc("/pause", func(w http.ResponseWriter, _ *http.Request) {
+		pauseLoad()
+		<-stopCh
+		w.WriteHeader(http.StatusOK)
+	})
 	mux.HandleFunc("/stop", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("stopping"))
@@ -118,12 +137,21 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("loadgen: listening on %s, seeds=%v workers=%d qps=%d shards_refresh_interval=%s",
-		*listen, seeds, *startWorkers, *startQPS, shardsRefreshInterval.String())
+	log.Printf("loadgen: listening on %s, seeds=%v workers=%d qps=%d open_loop=%t shards_refresh_interval=%s",
+		*listen, seeds, *startWorkers, *startQPS, *openLoop, shardsRefreshInterval.String())
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("http server: %v", err)
 	}
 	<-stopCh
+}
+
+func envInt(key string, fallback int) int {
+	if value := os.Getenv(key); value != "" {
+		if n, err := strconv.Atoi(value); err == nil {
+			return n
+		}
+	}
+	return fallback
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {
@@ -152,6 +180,8 @@ type generator struct {
 
 	mu      sync.Mutex
 	written map[string]string // key → expected value (for GET verification)
+
+	timeline *timeline
 }
 
 // Stats is the JSON shape returned by GET /stats.
@@ -219,11 +249,11 @@ func (g *generator) runWorker(ctx context.Context, wg *sync.WaitGroup, workerID 
 		// driven by per-op math.rand to avoid a shared RNG mutex.
 		switch r := mathrand.IntN(100); {
 		case r < 70:
-			g.doGet(ctx)
+			_ = g.doGet(ctx)
 		case r < 95:
-			g.doSet(ctx, workerID*1_000_000+counter)
+			_ = g.doSet(ctx, workerID*1_000_000+counter)
 		default:
-			g.doMGet(ctx)
+			_ = g.doMGet(ctx)
 		}
 	}
 }
@@ -236,22 +266,23 @@ func (g *generator) runWorker(ctx context.Context, wg *sync.WaitGroup, workerID 
 // MGET stays valid: doMGet still groups keys by their (now more numerous) hash tag.
 const loadgenKeyTags = 256
 
-func (g *generator) doSet(ctx context.Context, n int64) {
+func (g *generator) doSet(ctx context.Context, n int64) error {
 	key := fmt.Sprintf("%s:{k-%d}:%d", g.keyPrefix, n%loadgenKeyTags, n)
 	val := randomValue()
 	cmd := g.client.B().Set().Key(key).Value(val).Build()
 	if err := g.client.Do(ctx, cmd).Error(); err != nil {
 		g.setsFail.Add(1)
 		g.recordErr("SET", err)
-		return
+		return err
 	}
 	g.mu.Lock()
 	g.written[key] = val
 	g.mu.Unlock()
 	g.setsOK.Add(1)
+	return nil
 }
 
-func (g *generator) doGet(ctx context.Context) {
+func (g *generator) doGet(ctx context.Context) error {
 	g.mu.Lock()
 	var key, want string
 	for k, v := range g.written {
@@ -260,7 +291,7 @@ func (g *generator) doGet(ctx context.Context) {
 	}
 	g.mu.Unlock()
 	if key == "" {
-		return // nothing to GET yet
+		return errNothingWritten
 	}
 	cmd := g.client.B().Get().Key(key).Build()
 	got, err := g.client.Do(ctx, cmd).ToString()
@@ -269,26 +300,27 @@ func (g *generator) doGet(ctx context.Context) {
 			// Key may have been evicted; not a hard failure.
 			g.getsFail.Add(1)
 			g.recordErr("GET nil", err)
-			return
+			return err
 		}
 		g.getsFail.Add(1)
 		g.recordErr("GET", err)
-		return
+		return err
 	}
 	if got != want {
 		g.mismatch.Add(1)
 		s := fmt.Sprintf("key=%s want=%q got=%q", key, want, got)
 		g.lastErr.Store(&s)
-		return
+		return errors.New(s)
 	}
 	g.getsOK.Add(1)
+	return nil
 }
 
 // doMGet picks up to 16 keys from one hash slot and issues a single
 // MGET. Redis Cluster rejects cross-slot multi-key commands, so the
 // loadgen key format includes a hash tag and this selector keeps MGETs
 // valid while still exercising cluster routing.
-func (g *generator) doMGet(ctx context.Context) {
+func (g *generator) doMGet(ctx context.Context) error {
 	g.mu.Lock()
 	keys := make([]string, 0, 16)
 	var tag string
@@ -306,16 +338,17 @@ func (g *generator) doMGet(ctx context.Context) {
 	}
 	g.mu.Unlock()
 	if len(keys) == 0 {
-		return
+		return errNothingWritten
 	}
 	cmd := g.client.B().Mget().Key(keys...).Build()
 	_, err := g.client.Do(ctx, cmd).ToArray()
 	if err != nil {
 		g.getsFail.Add(1)
 		g.recordErr("MGET", err)
-		return
+		return err
 	}
 	g.getsOK.Add(1)
+	return nil
 }
 
 func hashTag(key string) string {
