@@ -7,4 +7,3 @@
 # Resolve `source "$dir/common.sh"` relative to the script being checked.
 source-path=SCRIPTDIR
 external-sources=true
-
