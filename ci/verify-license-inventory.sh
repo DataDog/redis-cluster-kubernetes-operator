@@ -5,7 +5,8 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
 readonly INVENTORY="$REPO_ROOT/LICENSE-3rdparty.csv"
 
 expected="$(mktemp "${TMPDIR:-/tmp}/redis-operator-license-modules.XXXXXX")"

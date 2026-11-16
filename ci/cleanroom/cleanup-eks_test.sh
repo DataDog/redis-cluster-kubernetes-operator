@@ -5,8 +5,10 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-readonly TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cleanup-eks-test.XXXXXX")"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly REPO_ROOT
+TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cleanup-eks-test.XXXXXX")"
+readonly TEST_DIR
 trap 'rm -rf "$TEST_DIR"' EXIT
 
 mkdir -p "$TEST_DIR/bin"

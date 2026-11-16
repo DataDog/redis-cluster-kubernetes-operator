@@ -90,6 +90,7 @@ cleanroom_collect_failure_artifacts() {
     return 2
   }
 
+  # shellcheck disable=SC2153 # REPO_ROOT is set by the sourcing script.
   KUBECONFIG="$kubeconfig" "$REPO_ROOT/ci/cleanroom/collect-artifacts.sh" "$destination" "$namespace" &
   collector_pid=$!
   (
@@ -134,7 +135,7 @@ cleanroom_run_tests() {
   local timeout="${CLEANROOM_TEST_TIMEOUT:-90m}"
 
   (
-    cd "$repo_root"
+    cd "$repo_root" || return
     go test -tags=blackbox_e2e -count=1 ./test/blackbox -run "$selector" -timeout "$timeout"
   )
 }
