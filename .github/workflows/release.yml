@@ -7,6 +7,10 @@ on:
   push:
     tags: ["v*.*.*"]
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -24,6 +28,9 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Require the tagged commit to be on main
+        run: git merge-base --is-ancestor "$(git rev-parse HEAD)" refs/remotes/origin/main
       - name: Derive version from tag
         id: version
         run: |
@@ -37,6 +44,11 @@ jobs:
           go-version-file: go.mod
           cache: true
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - name: Install pinned YAML parser
+        run: |
+          python3 -m venv "$RUNNER_TEMP/release-python"
+          "$RUNNER_TEMP/release-python/bin/pip" install PyYAML==6.0.3
+          echo "$RUNNER_TEMP/release-python/bin" >> "$GITHUB_PATH"
       - name: Install Kubernetes 1.33 envtest binaries
         run: |
           assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20250626154428-7fd020cb5fc3 use 1.33.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
@@ -48,6 +60,7 @@ jobs:
           helm lint . --strict --kube-version 1.33.0
           ci/test-chart-image-settings.sh
           ci/test-instance-chart.sh
+          ci/test-release.sh
 
   publish:
     name: Publish image, charts and manifests
@@ -69,14 +82,23 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push multi-architecture image
+      - name: Reuse the candidate image on retries
+        id: candidate
+        run: |
+          source ci/release-artifacts.sh
+          candidate="$IMAGE:release-$VERSION-$GITHUB_SHA"
+          digest="$(registry_digest "$candidate")"
+          echo "ref=$candidate" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Build and push candidate multi-architecture image
+        if: steps.candidate.outputs.digest == ''
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          tags: ${{ steps.candidate.outputs.ref }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -84,39 +106,46 @@ jobs:
           sbom: true
           provenance: mode=max
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
-      - name: Package and push charts
+      - name: Install pinned YAML parser
+        run: |
+          python3 -m venv "$RUNNER_TEMP/release-python"
+          "$RUNNER_TEMP/release-python/bin/pip" install PyYAML==6.0.3
+          echo "$RUNNER_TEMP/release-python/bin" >> "$GITHUB_PATH"
+      - name: Select the image digest
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.candidate.outputs.digest || steps.build.outputs.digest }}
+        run: echo "DIGEST=$DIGEST" >> "$GITHUB_ENV"
+      - name: Prepare charts and release manifests
+        run: ci/prepare-release.sh
+      - name: Push charts without replacing existing versions
+        env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Pin the published operator chart to the image built above.
-          yq -i '.operator.image.tag = strenv(VERSION) | .operator.image.digest = strenv(DIGEST)' values.yaml
-          mkdir -p "$RUNNER_TEMP/charts"
-          helm package . --version "$VERSION" --app-version "$VERSION" --destination "$RUNNER_TEMP/charts"
-          helm package deploy/redis-cluster --version "$VERSION" --destination "$RUNNER_TEMP/charts"
+          source ci/release-artifacts.sh
           helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$REGISTRY_TOKEN"
-          for chart in "$RUNNER_TEMP"/charts/*.tgz; do
-            helm push "$chart" "$CHART_REPO"
-          done
-      - name: Render release manifests
-        run: |
-          cp crds/redis-cluster-v1.yaml "$RUNNER_TEMP/crds.yaml"
-          {
-            cat crds/redis-cluster-v1.yaml
-            echo "---"
-            helm template redis-cluster-operator "$RUNNER_TEMP/charts/redis-cluster-kubernetes-operator-$VERSION.tgz" \
-              --namespace redis-cluster-operator --set namespace.create=true --kube-version 1.33.0
-          } > "$RUNNER_TEMP/install.yaml"
-      - name: Attach manifests to the GitHub release
+          publish_chart "$RUNNER_TEMP/charts/redis-cluster-kubernetes-operator-$VERSION.tgz" redis-cluster-kubernetes-operator
+          publish_chart "$RUNNER_TEMP/charts/redis-cluster-$VERSION.tgz" redis-cluster
+      - name: Prepare the draft release and assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
-          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/install.yaml" "$RUNNER_TEMP/crds.yaml" --clobber
-      - name: Summary
+          # A completed release is left untouched on a retry.
+          if ! gh release view "$GITHUB_REF_NAME" --json isDraft > "$RUNNER_TEMP/release.json"; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --draft
+            gh release view "$GITHUB_REF_NAME" --json isDraft > "$RUNNER_TEMP/release.json"
+          fi
+          if jq -e '.isDraft' "$RUNNER_TEMP/release.json" >/dev/null; then
+            gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/install.yaml" "$RUNNER_TEMP/crds.yaml" --clobber
+          fi
+      - name: Promote the image version without overwriting it
+        run: |
+          source ci/release-artifacts.sh
+          promote_image
+      - name: Publish the prepared release
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+      - name: Summary
         run: |
           {
             echo "### Release $VERSION"

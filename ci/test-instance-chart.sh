@@ -44,4 +44,40 @@ with open(sys.argv[1]) as f:
 if rendered != example:
     sys.exit("deploy/redis-cluster default render differs from " + sys.argv[1])
 ' "$EXAMPLE"
+# The instance chart and the operator chart must accept the same Kubernetes
+# versions, including the staging qualification version and its boundaries.
+for kube_version in 1.33.0 1.36.0; do
+  helm template cache "$CHART" --kube-version "$kube_version" >/dev/null
+done
+for kube_version in 1.32.9 1.34.0 1.35.0 1.37.0; do
+  if helm template cache "$CHART" --kube-version "$kube_version" >/dev/null 2>&1; then
+    echo "instance chart accepted unsupported Kubernetes $kube_version" >&2
+    exit 1
+  fi
+done
+
+# Probe the TLS listener, including when Redis requires client certificates.
+# A custom port must be used consistently by redis-server, the container and
+# both probes, rather than silently probing the always-enabled plaintext port.
+for auth_clients in no optional yes; do
+  helm template cache "$CHART" --kube-version 1.33.0 \
+    --set tls.enabled=true --set tls.secretName=cache-tls \
+    --set tls.port=6381 --set tls.authClients="$auth_clients" \
+    | python3 -c '
+import sys, yaml
+cluster = next(doc for doc in yaml.safe_load_all(sys.stdin) if doc and doc["kind"] == "RedisCluster")
+container = cluster["spec"]["statefulsetTemplate"]["spec"]["template"]["spec"]["containers"][0]
+args = container["args"]
+assert args[args.index("--tls-port") + 1] == "6381"
+assert args[args.index("--tls-auth-clients") + 1] == sys.argv[1]
+assert {port["name"]: port["containerPort"] for port in container["ports"]}["redis-tls"] == 6381
+expected = ["redis-cli", "-e", "-h", "127.0.0.1", "-p", "6381", "--tls",
+            "--cacert", "/tls/ca.crt"]
+if sys.argv[1] == "yes":
+    expected += ["--cert", "/tls/tls.crt", "--key", "/tls/tls.key"]
+expected += ["ping"]
+for probe in ("readinessProbe", "livenessProbe"):
+    assert container[probe]["exec"]["command"] == expected, probe + " must check the TLS listener"
+' "$auth_clients"
+done
 echo "instance chart OK"

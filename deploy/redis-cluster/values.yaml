@@ -38,6 +38,7 @@ tls:
   secretName: ""
   port: 6380
   # no | optional | yes (mTLS)
+  # With yes, tls.crt must also allow client authentication for health probes.
   authClients: optional
 
 nodeSelector: {}

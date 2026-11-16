@@ -47,6 +47,11 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - name: Install pinned YAML parser
+        run: |
+          python3 -m venv "$RUNNER_TEMP/release-python"
+          "$RUNNER_TEMP/release-python/bin/pip" install PyYAML==6.0.3
+          echo "$RUNNER_TEMP/release-python/bin" >> "$GITHUB_PATH"
       - name: Lint and validate chart values
         run: |
           helm lint . --strict --kube-version 1.33.0
@@ -75,6 +80,8 @@ jobs:
         run: ci/test-chart-operator-strategy.sh
       - name: Validate the RedisCluster instance chart
         run: ci/test-instance-chart.sh
+      - name: Validate release preparation and retry behavior
+        run: ci/test-release.sh
 
   pull-request-smoke:
     if: github.event_name == 'pull_request'

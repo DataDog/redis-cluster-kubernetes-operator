@@ -122,12 +122,20 @@ spec:
                 {{- end }}
               readinessProbe:
                 exec:
+                  {{- if .Values.tls.enabled }}
+                  command: ["redis-cli", "-e", "-h", "127.0.0.1", "-p", {{ .Values.tls.port | quote }}, "--tls", "--cacert", "/tls/ca.crt",{{ if eq .Values.tls.authClients "yes" }} "--cert", "/tls/tls.crt", "--key", "/tls/tls.key",{{ end }} "ping"]
+                  {{- else }}
                   command: ["redis-cli", "-h", "127.0.0.1", "ping"]
+                  {{- end }}
                 initialDelaySeconds: 3
                 periodSeconds: 5
               livenessProbe:
                 exec:
+                  {{- if .Values.tls.enabled }}
+                  command: ["redis-cli", "-e", "-h", "127.0.0.1", "-p", {{ .Values.tls.port | quote }}, "--tls", "--cacert", "/tls/ca.crt",{{ if eq .Values.tls.authClients "yes" }} "--cert", "/tls/tls.crt", "--key", "/tls/tls.key",{{ end }} "ping"]
+                  {{- else }}
                   command: ["redis-cli", "-h", "127.0.0.1", "ping"]
+                  {{- end }}
                 initialDelaySeconds: 15
                 periodSeconds: 10
               securityContext:

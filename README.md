@@ -37,6 +37,10 @@ healthy Redis topology. It never uses the current context from the default
 kubeconfig. See [`docs/getting-started.md`](docs/getting-started.md) for data,
 restart, log, qualification, and cleanup commands.
 
+If this local cluster was created with the previous `kubectl apply` quick
+start, run `make local-down` followed by `make local-up` once to switch to
+Helm ownership. This reset deletes the local cluster and its Redis data.
+
 ## Install
 
 Prerequisites are Helm 3 and a Kubernetes 1.33 cluster. The operator is
@@ -57,8 +61,10 @@ helm install cache oci://ghcr.io/datadog/charts/redis-cluster \
 ```
 
 Without Helm, `kubectl apply --server-side -f install.yaml` installs the CRD
-and the operator into the `redis-cluster-operator` namespace. Apply `crds.yaml`
-from a newer release to upgrade the CRD; Helm does not upgrade CRDs.
+and the operator into the `redis-cluster-operator` namespace. Create all
+`RedisCluster` resources in that same namespace; this operator does not watch
+other namespaces. Apply `crds.yaml` from a newer release to upgrade the CRD;
+Helm does not upgrade CRDs.
 
 The `redis-cluster` chart renders the headless Service and the
 contract-correct StatefulSet template from a few values (`primaries`,
@@ -232,7 +238,7 @@ portability.
 ## Beta limitations
 
 - Only Redis 8.6 and Kubernetes 1.33 are claimed as compatible.
-- Releases before the first tag built by `.github/workflows/release.yml` have no published image or chart.
+- No image or chart is published until the first tagged release.
 - The reference binary enables no autoscaling recommendation provider or provider-specific lifecycle adapter.
 - Primary downscale is not supported in the initial public release. Lowering `spec.primaries` does not lower the retained effective target or remove Redis pods.
 - Blue-green rollout qualification covers image changes. Other pod-template

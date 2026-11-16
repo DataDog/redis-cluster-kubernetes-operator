@@ -120,6 +120,22 @@ fi
 export KUBECONFIG="$KUBECONFIG_PATH"
 cleanroom_verify_context "$KUBECONFIG_PATH" "kind-$CLUSTER_NAME"
 
+# Helm cannot adopt resources left by the former kubectl-based quick start.
+# Check before rebuilding the image or updating the operator.
+instance_resources=(service)
+instance_crd="$(kubectl get crd redisclusters.cache.datadoghq.com --ignore-not-found --output name)"
+if [[ -n "$instance_crd" ]]; then
+  instance_resources+=(rediscluster)
+fi
+for resource in "${instance_resources[@]}"; do
+  ownership="$(kubectl get "$resource" "$REDIS_CLUSTER_NAME" --namespace "$NAMESPACE" \
+    --ignore-not-found \
+    --output 'jsonpath={.metadata.name}{"|"}{.metadata.labels.app\.kubernetes\.io/managed-by}{"|"}{.metadata.annotations.meta\.helm\.sh/release-name}{"|"}{.metadata.annotations.meta\.helm\.sh/release-namespace}')"
+  if [[ -n "$ownership" && "$ownership" != "$REDIS_CLUSTER_NAME|Helm|$REDIS_CLUSTER_NAME|$NAMESPACE" ]]; then
+    cleanroom_die "$resource/$REDIS_CLUSTER_NAME is not owned by Helm release '$REDIS_CLUSTER_NAME'; run make local-down followed by make local-up to reset (deletes local Redis data)"
+  fi
+done
+
 docker build --tag "$OPERATOR_IMAGE" "$REPO_ROOT"
 kind load docker-image --name "$CLUSTER_NAME" "$OPERATOR_IMAGE"
 
