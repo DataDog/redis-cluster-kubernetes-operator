@@ -3,8 +3,10 @@ RedisCluster {{ include "redis-cluster.fullname" . }}: {{ .Values.primaries }} p
 Watch it converge:
   kubectl get rediscluster,pods -n {{ .Release.Namespace }} -l redis_cluster_name={{ include "redis-cluster.fullname" . }}
 
-Connect:
-  kubectl exec -n {{ .Release.Namespace }} {{ include "redis-cluster.fullname" . }}-0 -c redis -- redis-cli -c PING
+Connect after the cluster is ready:
+  ACTIVE_STS="$(kubectl get rediscluster {{ include "redis-cluster.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath='{.status.activeClusterName}')"
+  REDIS_POD="${ACTIVE_STS:-{{ include "redis-cluster.fullname" . }}}-0"
+  kubectl exec -n {{ .Release.Namespace }} "$REDIS_POD" -c redis -- redis-cli -c PING
 {{- if .Values.tls.enabled }}
-  kubectl exec -n {{ .Release.Namespace }} {{ include "redis-cluster.fullname" . }}-0 -c redis -- redis-cli --tls --cacert /tls/ca.crt -p {{ .Values.tls.port }} -c PING
+  kubectl exec -n {{ .Release.Namespace }} "$REDIS_POD" -c redis -- redis-cli --tls --cacert /tls/ca.crt{{ if eq .Values.tls.authClients "yes" }} --cert /tls/tls.crt --key /tls/tls.key{{ end }} -p {{ .Values.tls.port }} -c PING
 {{- end }}

@@ -43,10 +43,15 @@ export KUBECONFIG="$PWD/.local/kubeconfig"
 ```
 
 Run `make local-up` again after code changes. It reuses the named KIND cluster,
-rebuilds and reloads the local operator image, upgrades the Helm release,
-reapplies the example, and waits for all 16,384 slots and the expected six
-Redis nodes. If you changed the example topology, use `make local-down` first
-to reset its retained topology state.
+rebuilds and reloads the local operator image, upgrades the operator Helm release,
+and installs or upgrades `deploy/redis-cluster` as the `cache` Helm release. It
+waits for all 16,384 slots and the expected six Redis nodes. Edits to
+`examples/redis-cluster.yaml` do not affect `local-up`; it uses the instance
+chart's defaults and expects the default six-node topology.
+
+If you changed the local topology manually or created the cluster with the
+previous `kubectl apply` helper, run `make local-down` followed by
+`make local-up` to reset it. This deletes the local cluster and its Redis data.
 
 The helper records ownership under `.local/` when it creates the cluster. It
 refuses to reuse or delete a same-name cluster created outside this checkout.

@@ -80,4 +80,64 @@ for probe in ("readinessProbe", "livenessProbe"):
     assert container[probe]["exec"]["command"] == expected, probe + " must check the TLS listener"
 ' "$auth_clients"
 done
+# Helm omits NOTES.txt from template output. Render the same source through tpl
+# in a temporary chart so the emitted shell commands can be exercised offline.
+notes_chart="$(mktemp -d)"
+trap 'rm -rf "$notes_chart"' EXIT
+cp -R "$CHART/." "$notes_chart/"
+cp "$CHART/templates/NOTES.txt" "$notes_chart/connection-notes.txt"
+cat > "$notes_chart/templates/notes-test.yaml" <<'NOTES_TEMPLATE'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: connection-notes-test
+data:
+  notes: |-
+{{ tpl (.Files.Get "connection-notes.txt") . | indent 4 }}
+NOTES_TEMPLATE
+for auth_clients in disabled no optional yes; do
+  tls_enabled=true
+  [[ "$auth_clients" != disabled ]] || tls_enabled=false
+  helm template notes-release "$notes_chart" --namespace notes-namespace --kube-version 1.33.0 \
+    --set fullnameOverride=notes-cache --set tls.enabled="$tls_enabled" \
+    --set tls.secretName=cache-tls --set tls.port=6381 \
+    --set tls.authClients="${auth_clients/disabled/optional}" \
+    | python3 -c '
+import json, os, pathlib, subprocess, sys, tempfile, yaml
+notes = next(doc["data"]["notes"] for doc in yaml.safe_load_all(sys.stdin)
+             if doc and doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "connection-notes-test")
+commands = [line.strip() for line in notes.splitlines()
+            if line.startswith(("  ACTIVE_STS=", "  REDIS_POD=", "  kubectl exec "))]
+mode = sys.argv[1]
+with tempfile.TemporaryDirectory() as directory:
+    root = pathlib.Path(directory)
+    kubectl = root / "kubectl"
+    kubectl.write_text("""#!/usr/bin/env python3
+import json, os, sys
+if sys.argv[1:] == ["get", "rediscluster", "notes-cache", "-n", "notes-namespace", "-o", "jsonpath={.status.activeClusterName}"]:
+    print(os.environ["TEST_ACTIVE_STS"], end="")
+elif sys.argv[1] == "exec":
+    with open(os.environ["TEST_CALLS"], "a") as output:
+        output.write(json.dumps(sys.argv[1:]) + "\\n")
+else:
+    sys.exit("unexpected kubectl arguments: " + repr(sys.argv[1:]))
+""")
+    kubectl.chmod(0o755)
+    for active in ("", "notes-cache-alt"):
+        calls = root / "calls.jsonl"
+        calls.write_text("")
+        env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"],
+                   TEST_ACTIVE_STS=active, TEST_CALLS=str(calls))
+        subprocess.run(["bash", "-eu", "-c", "\n".join(commands)], env=env, check=True)
+        actual = [json.loads(line) for line in calls.read_text().splitlines()]
+        prefix = ["exec", "-n", "notes-namespace", (active or "notes-cache") + "-0", "-c", "redis", "--", "redis-cli"]
+        expected = [prefix + ["-c", "PING"]]
+        if mode != "disabled":
+            tls = ["--tls", "--cacert", "/tls/ca.crt"]
+            if mode == "yes":
+                tls += ["--cert", "/tls/tls.crt", "--key", "/tls/tls.key"]
+            expected.append(prefix + tls + ["-p", "6381", "-c", "PING"])
+        assert actual == expected, (mode, active, actual)
+' "$auth_clients"
+done
 echo "instance chart OK"
