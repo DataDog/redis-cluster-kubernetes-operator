@@ -5,8 +5,10 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/local-kind-ownership-test.XXXXXX")"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
+TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/local-kind-ownership-test.XXXXXX")"
+readonly TEST_DIR
 readonly FAKE_BIN="$TEST_DIR/bin"
 readonly MOCK_LOG="$TEST_DIR/commands.log"
 readonly CLUSTER_NAME="redis-operator-dev"

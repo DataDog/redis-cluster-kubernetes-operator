@@ -5,7 +5,8 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly REPO_ROOT
 readonly LANE="${1:?clean-room lane is required}"
 readonly MANIFEST="$REPO_ROOT/ci/cleanroom-lanes.txt"
 readonly KIND_NODE_IMAGE="${CLEANROOM_KIND_NODE_IMAGE:-kindest/node:v1.33.1}"
@@ -17,7 +18,8 @@ readonly RELEASE="redis-operator"
 readonly IMAGE_REPOSITORY="redis-cluster-kubernetes-operator"
 readonly IMAGE_TAG="$RUN_ID"
 readonly OPERATOR_IMAGE="$IMAGE_REPOSITORY:$IMAGE_TAG"
-readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-cleanroom-kind.XXXXXX")"
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-cleanroom-kind.XXXXXX")"
+readonly TEMP_DIR
 readonly KUBECONFIG_PATH="$TEMP_DIR/kubeconfig"
 readonly RESOURCE_STATE="$TEMP_DIR/resource-state"
 readonly ARTIFACT_DIR="${CLEANROOM_ARTIFACT_DIR:-$REPO_ROOT/cleanroom-artifacts/$RUN_ID}"

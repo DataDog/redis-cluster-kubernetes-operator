@@ -18,4 +18,8 @@ List the commands and environments used to validate the change.
 - [ ] No credentials, private endpoints, customer data, or internal deployment details are included.
 - [ ] New or updated dependencies are represented in `LICENSE-3rdparty.csv`.
 
+- [ ] AI assistance was used. If checked, name the tool and what it did (drafted code, tests, docs, review); I have reviewed and can explain every change.
+
+AI use (tool and how):
+
 Related issue:

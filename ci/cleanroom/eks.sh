@@ -5,7 +5,8 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly REPO_ROOT
 # shellcheck source=common.sh
 source "$REPO_ROOT/ci/cleanroom/common.sh"
 
@@ -19,7 +20,8 @@ readonly OWNER_TAG_KEY="redis-cluster-kubernetes-operator-cleanroom"
 readonly OWNER_TAG_VALUE="$RUN_ID"
 readonly NAMESPACE="redis-cluster-example"
 readonly RELEASE="redis-operator"
-readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-cleanroom-eks.XXXXXX")"
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-cleanroom-eks.XXXXXX")"
+readonly TEMP_DIR
 readonly KUBECONFIG_PATH="$TEMP_DIR/kubeconfig"
 readonly ARTIFACT_DIR="${CLEANROOM_ARTIFACT_DIR:-$REPO_ROOT/cleanroom-artifacts/$RUN_ID}"
 readonly RESOURCE_STATE="${CLEANROOM_RESOURCE_STATE:-${TMPDIR:-/tmp}/redis-cleanroom-eks-$RUN_ID.state}"

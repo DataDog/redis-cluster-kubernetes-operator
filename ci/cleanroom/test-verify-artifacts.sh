@@ -5,9 +5,11 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly REPO_ROOT
 readonly SCANNER="$REPO_ROOT/ci/cleanroom/verify-artifacts.sh"
-readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/verify-artifacts-test.XXXXXX")"
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/verify-artifacts-test.XXXXXX")"
+readonly TEMP_DIR
 readonly HEX36="0123456789abcdef0123456789abcdef0123"
 
 cleanup() {

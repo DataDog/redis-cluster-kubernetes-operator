@@ -1,0 +1,20 @@
+{
+  "name": "redis-cluster-operator",
+  "description": "Install the Datadog redis-cluster-kubernetes-operator, size and create a Redis Cluster, verify it serves traffic, and run read-only health checks.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Datadog"
+  },
+  "homepage": "https://github.com/DataDog/redis-cluster-kubernetes-operator",
+  "repository": "https://github.com/DataDog/redis-cluster-kubernetes-operator",
+  "license": "Apache-2.0",
+  "keywords": [
+    "redis",
+    "kubernetes",
+    "operator"
+  ],
+  "skills": [
+    "./redis-cluster-setup",
+    "./redis-cluster-health"
+  ]
+}

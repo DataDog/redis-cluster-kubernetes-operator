@@ -5,8 +5,10 @@
 
 set -euo pipefail
 
-readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/collect-artifacts-test.XXXXXX")"
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly SOURCE_ROOT
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/collect-artifacts-test.XXXXXX")"
+readonly TEMP_DIR
 readonly FAKE_ROOT="$TEMP_DIR/repo"
 readonly FAKE_BIN="$TEMP_DIR/bin"
 readonly LOG="$TEMP_DIR/commands.log"

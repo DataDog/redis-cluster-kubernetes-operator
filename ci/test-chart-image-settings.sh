@@ -5,12 +5,14 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
 readonly DIGEST="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 readonly REPOSITORY="ghcr.io/datadog/redis-cluster-kubernetes-operator"
 readonly RELEASE="chart-image-test"
 readonly NAMESPACE="chart-image-test"
-readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-chart-test.XXXXXX")"
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-chart-test.XXXXXX")"
+readonly TEMP_DIR
 
 cleanup() {
   rm -rf "$TEMP_DIR"

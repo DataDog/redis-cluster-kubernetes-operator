@@ -1,0 +1,16 @@
+{
+  "name": "redis-cluster-kubernetes-operator",
+  "metadata": {
+    "description": "Claude Code plugins for the Datadog redis-cluster-kubernetes-operator."
+  },
+  "owner": {
+    "name": "Datadog"
+  },
+  "plugins": [
+    {
+      "name": "redis-cluster-operator",
+      "source": "./skills",
+      "description": "Set up and health-check Redis Clusters run by the redis-cluster-kubernetes-operator."
+    }
+  ]
+}

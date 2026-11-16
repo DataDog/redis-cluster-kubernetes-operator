@@ -3,10 +3,13 @@
 # This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
 
 
+# shellcheck disable=SC2030,SC2031 # each case sets PATH in its own subshell on purpose.
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kind-version-test.XXXXXX")"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly REPO_ROOT
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kind-version-test.XXXXXX")"
+readonly TEMP_DIR
 readonly FAKE_BIN="$TEMP_DIR/bin"
 
 cleanup() {
