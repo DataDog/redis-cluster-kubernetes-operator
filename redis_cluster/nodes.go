@@ -31,7 +31,7 @@ func (n *ClusterNode) determineRole() NodeRole {
 	isPrimary := utils.ContainsString(n.Flags, "master")
 	isReplica := utils.ContainsString(n.Flags, "slave")
 
-	relevantFlags := filterOutMyselfFlag(n.Flags)
+	relevantFlags := filterRoleNeutralFlags(n.Flags)
 	hasOnlyOneRelevantFlag := len(relevantFlags) == 1
 
 	isOutsider := isPrimary && hasOnlyOneRelevantFlag &&
@@ -59,13 +59,16 @@ func (n *ClusterNode) determineRole() NodeRole {
 	return OtherNode
 }
 
-// filterOutMyselfFlag removes the "myself" flag from the flags slice.
-// The "myself" flag is always present on a node's own CLUSTER NODES output
-// and shouldn't affect role determination.
-func filterOutMyselfFlag(flags []string) []string {
+// filterRoleNeutralFlags removes flags that say nothing about a node's health,
+// so they don't affect role determination:
+//   - "myself" is always present on a node's own CLUSTER NODES line;
+//   - "nofailover" is set on every node configured with
+//     cluster-replica-no-failover yes, masters included, and is gossiped to
+//     the rest of the cluster.
+func filterRoleNeutralFlags(flags []string) []string {
 	result := make([]string, 0, len(flags))
 	for _, f := range flags {
-		if f != "myself" {
+		if f != "myself" && f != "nofailover" {
 			result = append(result, f)
 		}
 	}
@@ -104,7 +107,7 @@ func GetNodeSummary(nodes map[NodeRole][]*ClusterNode) string {
 }
 
 func (n *ClusterNode) GetRoleDebugInfo() map[string]interface{} {
-	relevantFlags := filterOutMyselfFlag(n.Flags)
+	relevantFlags := filterRoleNeutralFlags(n.Flags)
 	isPrimary := utils.ContainsString(n.Flags, "master")
 	isReplica := utils.ContainsString(n.Flags, "slave")
 

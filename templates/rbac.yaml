@@ -35,6 +35,13 @@ rules:
   - apiGroups: ["cache.datadoghq.com"]
     resources: ["redisclusters/status"]
     verbs: ["get", "update", "patch"]
+  # The operator sets a controller ownerReference (blockOwnerDeletion: true)
+  # from each RedisCluster to the StatefulSets and Services it creates. With
+  # the OwnerReferencesPermissionEnforcement admission plugin (on by default
+  # in OpenShift) that requires update on the owner's finalizers subresource.
+  - apiGroups: ["cache.datadoghq.com"]
+    resources: ["redisclusters/finalizers"]
+    verbs: ["update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

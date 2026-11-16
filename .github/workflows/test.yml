@@ -75,6 +75,8 @@ jobs:
         run: ci/test-chart-image-settings.sh
       - name: Verify operator rollout strategy
         run: ci/test-chart-operator-strategy.sh
+      - name: Verify operator RBAC for owner references
+        run: ci/test-chart-rbac-owner-references.sh
 
   pull-request-smoke:
     if: github.event_name == 'pull_request'

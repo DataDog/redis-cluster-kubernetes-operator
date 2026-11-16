@@ -211,8 +211,44 @@ func mergeRedisNodes(t *Toolbox, nodes []*ClusterNode) ([]*ClusterNode, error) {
 		}
 	}
 	hydrateUnavailableNodesFromViews(nodes)
+	nodes = foldPodlessDuplicates(nodes)
 
 	return nodes, nil
+}
+
+// foldPodlessDuplicates merges pod-less entries into the pod-backed node that
+// owns the same node ID. Peers are parsed in pod order, so when a peer still
+// advertises a pod at a stale address (e.g. right after the pod was recreated
+// with a new IP), its line is seen before that pod's own "myself" line has set
+// the ID, and a pod-less entry is created for it. Left alone, that entry is
+// classified as a zombie and the live node's ID is sent to CLUSTER FORGET.
+func foldPodlessDuplicates(nodes []*ClusterNode) []*ClusterNode {
+	byID := make(map[string]*ClusterNode)
+	for _, node := range nodes {
+		if node.PodIndex >= 0 && node.ID != "" {
+			byID[node.ID] = node
+		}
+	}
+	kept := nodes[:0]
+	for _, node := range nodes {
+		owner, ok := byID[node.ID]
+		if node.PodIndex >= 0 || !ok {
+			kept = append(kept, node)
+			continue
+		}
+		if owner.Views == nil {
+			owner.Views = make(map[int]*NodeView)
+		}
+		for index, view := range node.Views {
+			if _, exists := owner.Views[index]; !exists {
+				owner.Views[index] = view
+			}
+		}
+		if owner.Hostname == "" {
+			owner.Hostname = node.Hostname
+		}
+	}
+	return kept
 }
 
 func hydrateUnavailableNodesFromViews(nodes []*ClusterNode) {
