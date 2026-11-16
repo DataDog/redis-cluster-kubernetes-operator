@@ -157,6 +157,7 @@ func lookupClusterNodeByID(nodes []*ClusterNode, id string) (*ClusterNode, bool)
 	return nil, false
 }
 
+//nolint:unused // dead code kept for now; removal is a separate cleanup
 func lookupClusterNodeByIndex(nodes []*ClusterNode, index int) (*ClusterNode, bool) {
 	for _, node := range nodes {
 		if node.PodIndex == index {
@@ -174,6 +175,7 @@ func (c *Cluster) LookupNodeByIP(id string) (*ClusterNode, bool) {
 	return lookupClusterNodeByIP(c.AllNodes, id)
 }
 
+//nolint:unused // dead code kept for now; removal is a separate cleanup
 func (c *Cluster) lookupNodeByIndex(index int) (*ClusterNode, bool) {
 	return lookupClusterNodeByIndex(c.AllNodes, index)
 }

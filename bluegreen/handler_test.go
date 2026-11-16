@@ -1046,7 +1046,7 @@ func TestShardMapping_ValidStructure(t *testing.T) {
 func mustAtoi(t *testing.T, s string) int {
 	t.Helper()
 	v := 0
-	fmt.Sscanf(s, "%d", &v)
+	_, _ = fmt.Sscanf(s, "%d", &v)
 	return v
 }
 

@@ -5,6 +5,7 @@
 
 set -euo pipefail
 
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly MANIFEST="$REPO_ROOT/ci/cleanroom-lanes.txt"
 readonly EXPECTED_LANES="smoke packaging lifecycle topology security"

@@ -293,7 +293,7 @@ func (cc *ClusterClient) TryReadyStatefulSet(ctx context.Context, redisCluster *
 			"current", redisStatefulSet.Status.Replicas)
 		return false, nil
 	}
-	if expectedPodCount != int(*&redisStatefulSet.Status.AvailableReplicas) {
+	if expectedPodCount != int(redisStatefulSet.Status.AvailableReplicas) {
 		cc.Log.Info("Waiting for pods to become available",
 			"expected", expectedPodCount,
 			"available", redisStatefulSet.Status.AvailableReplicas)

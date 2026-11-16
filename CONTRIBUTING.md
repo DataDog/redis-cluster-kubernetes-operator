@@ -16,6 +16,7 @@ Use Go 1.25 or later, Helm 3, and (for integration work) KIND with Kubernetes 1.
 ```sh
 go test ./...
 go vet ./...
+make verify-generated
 helm lint .
 helm template redis-cluster-kubernetes-operator . --namespace redis-operator
 make verify-crd-contract

@@ -136,7 +136,7 @@ func freeLocalPort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err, "allocate local port for loadgen port-forward")
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	addr, ok := ln.Addr().(*net.TCPAddr)
 	require.True(t, ok, "local listener address has type %T, want *net.TCPAddr", ln.Addr())
 	return addr.Port
@@ -204,7 +204,7 @@ func (g *RueidisGenerator) Stats() (RueidisStats, error) {
 	if err != nil {
 		return s, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return s, fmt.Errorf("GET /stats: %s: %s", resp.Status, readErrorBody(resp.Body))
 	}

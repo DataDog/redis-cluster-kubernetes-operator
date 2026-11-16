@@ -1,0 +1,41 @@
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+#
+# This product includes software developed at Datadog
+# (https://www.datadoghq.com/) Copyright 2026-Present Datadog, Inc.
+
+version: "2"
+
+run:
+  # Type-check the e2e and blackbox suites too. boringcrypto is a release-only
+  # build tag and is intentionally not enabled here.
+  build-tags:
+    - kind_e2e
+    - blackbox_e2e
+
+linters:
+  default: standard
+  settings:
+    staticcheck:
+      # Keep the bug-class SA/S checks; the style-only ST*/QF* checks would
+      # require broad churn (mostly capitalized error strings and embedded
+      # field selectors) with no correctness benefit.
+      checks:
+        - all
+        - -ST*
+        - -QF*
+  exclusions:
+    rules:
+      # controller-runtime deprecated Result.Requeue. Moving to RequeueAfter
+      # changes requeue backoff, which is an operator behavior change.
+      - linters: [staticcheck]
+        text: "SA1019: \\(sigs.k8s.io/controller-runtime.Result\\).Requeue is deprecated"
+      # e2e/lane_manifest_test.go is shared with several open PRs; leave it
+      # untouched. The unchecked Close is on a read-only file.
+      - path: e2e/lane_manifest_test.go
+        linters: [errcheck]
+        text: "f.Close"
+
+formatters:
+  enable:
+    - gofmt

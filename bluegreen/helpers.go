@@ -323,7 +323,7 @@ func (h *Handler) bgClusterConsistencyCheck(
 				clusterStateOK = strings.TrimPrefix(line, "cluster_state:") == "ok"
 			}
 			if strings.HasPrefix(line, "cluster_slots_fail:") {
-				fmt.Sscanf(strings.TrimPrefix(line, "cluster_slots_fail:"), "%d", &slotsFail)
+				_, _ = fmt.Sscanf(strings.TrimPrefix(line, "cluster_slots_fail:"), "%d", &slotsFail)
 			}
 		}
 		if !clusterStateOK {

@@ -5,11 +5,13 @@
 
 set -euo pipefail
 
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly DIGEST="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 readonly REPOSITORY="ghcr.io/datadog/redis-cluster-kubernetes-operator"
 readonly RELEASE="chart-image-test"
 readonly NAMESPACE="chart-image-test"
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-chart-test.XXXXXX")"
 
 cleanup() {

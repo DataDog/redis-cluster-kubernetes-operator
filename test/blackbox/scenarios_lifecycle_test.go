@@ -76,10 +76,10 @@ func TestCleanroom_PrimaryAndReplicaRecovery(t *testing.T) {
 	s := h.reference()
 	h.waitReady(s, 3, 1)
 	h.seedAndVerify(s)
-	primary, replica, _ := h.rolePods(s)
+	_, replica, _ := h.rolePods(s)
 	h.deleteAndWaitRecreated(s, replica)
 	h.verifyData(s)
-	primary, _, _ = h.rolePods(s)
+	primary, _, _ := h.rolePods(s)
 	h.deleteAndWaitRecreated(s, primary)
 	h.verifyData(s)
 }

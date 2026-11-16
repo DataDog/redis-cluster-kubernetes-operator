@@ -5,6 +5,7 @@
 
 set -euo pipefail
 
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly LANE="${1:?clean-room lane is required}"
 readonly MANIFEST="$REPO_ROOT/ci/cleanroom-lanes.txt"
@@ -17,6 +18,7 @@ readonly RELEASE="redis-operator"
 readonly IMAGE_REPOSITORY="redis-cluster-kubernetes-operator"
 readonly IMAGE_TAG="$RUN_ID"
 readonly OPERATOR_IMAGE="$IMAGE_REPOSITORY:$IMAGE_TAG"
+# shellcheck disable=SC2155 # keep readonly-at-assignment; splitting it would change set -e failure behavior.
 readonly TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redis-cleanroom-kind.XXXXXX")"
 readonly KUBECONFIG_PATH="$TEMP_DIR/kubeconfig"
 readonly RESOURCE_STATE="$TEMP_DIR/resource-state"

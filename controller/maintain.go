@@ -569,7 +569,7 @@ func (r *RedisClusterReconciler) recoverLostSlots(ctx context.Context, cluster *
 		if stageErr != nil {
 			return cluster, utils.WrapErr(stageErr, "failed to stage mapped lost-slot restore before topology mutation")
 		}
-		defer r.cleanupStagedArtifacts(cluster, staged)
+		defer r.cleanupStagedArtifacts(cluster, staged) //nolint:errcheck // best-effort cleanup; wrapping in a closure would change when arguments are evaluated
 	}
 
 	reowned := 0
